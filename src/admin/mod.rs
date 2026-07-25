@@ -23,12 +23,14 @@ pub mod proxy_pool;
 mod router;
 mod service;
 pub mod types;
+pub mod billing;
 mod binary_update;
 pub mod client_keys;
 pub mod groups;
 pub mod usage_stats;
 pub mod trace_db;
 
+pub use billing::BillingStore;
 pub use client_keys::ClientKeyManager;
 pub use groups::GroupManager;
 pub use middleware::AdminState;

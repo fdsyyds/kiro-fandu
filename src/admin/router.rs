@@ -10,7 +10,8 @@ use super::{
     handlers::{
         add_credential, add_proxy, apply_image_update, assign_proxies_round_robin,
         assign_proxy_to_credential, batch_add_proxies, batch_import_credentials,
-        check_all_proxies, check_proxy,
+        check_all_proxies, check_proxy, get_account_prices, get_billing_history,
+        get_billing_pricing, set_account_price, set_billing_pricing,
         check_rate_limit, check_update, clear_throttle, complete_social_login,
         complete_social_relogin, create_client_key, create_group, delete_client_key,
         delete_credential, delete_group, delete_proxy, disable_quota_exceeded, enable_overage_all,
@@ -169,6 +170,13 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/timeseries", get(stats_timeseries))
         .route("/stats/by-model", get(stats_by_model))
         .route("/stats/by-credential", get(stats_by_credential))
+        .route(
+            "/billing/pricing",
+            get(get_billing_pricing).put(set_billing_pricing),
+        )
+        .route("/billing/account-prices", get(get_account_prices))
+        .route("/billing/account-prices/{id}", put(set_account_price))
+        .route("/billing/history", get(get_billing_history))
         .route("/traces/failure-stats", get(trace_failure_stats))
         .route("/traces", get(list_traces))
         .layer(middleware::from_fn_with_state(

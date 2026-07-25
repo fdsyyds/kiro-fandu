@@ -210,6 +210,15 @@ async fn main() {
         }
     }
 
+    // 计费/盈亏配置（持久化到 billing.json，与凭据文件同目录）
+    let billing_path = admin::billing::default_path_in(&cache_dir);
+    let billing_store = std::sync::Arc::new(
+        admin::BillingStore::load(&billing_path).unwrap_or_else(|e| {
+            tracing::warn!("加载计费配置失败 ({}): {}", billing_path.display(), e);
+            admin::BillingStore::new()
+        }),
+    );
+
     // 请求链路追踪存储（SQLite，traces.db）。失败不致命：trace 不可用但服务正常。
     let trace_store: Option<admin::SharedTraceStore> = match admin::TraceStore::open(
         cache_dir.join("traces.db"),
@@ -293,6 +302,7 @@ async fn main() {
                 usage_aggregator.clone(),
                 admin_trace_store,
                 group_manager.clone(),
+                billing_store.clone(),
             );
 
             // 启动余额后台刷新调度器（每 5 分钟一次，与缓存 TTL 对齐）

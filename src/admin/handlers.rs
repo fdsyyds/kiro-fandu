@@ -310,10 +310,83 @@ pub async fn delete_credential(
     State(state): State<AdminState>,
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
+    // 删除前先归档该号的一生盈亏，供事后回看。
+    // 用量数据来自聚合器（受日志保留期约束，约近 31 天），号价来自 billing.json。
+    let archive = build_archive_snapshot(&state, id);
     match state.service.delete_credential(id) {
-        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已删除", id))).into_response(),
+        Ok(_) => {
+            if let Some(snapshot) = archive {
+                state.billing.archive(snapshot);
+            }
+            Json(SuccessResponse::new(format!("凭据 #{} 已删除", id))).into_response()
+        }
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// 组装被删除号的归档快照：邮箱 + 近 31 天累计 credit + 按 credit 占比分摊的累计收入。
+fn build_archive_snapshot(state: &AdminState, id: u64) -> Option<super::billing::ArchivedAccount> {
+    let email = state
+        .service
+        .get_all_credentials()
+        .credentials
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.email.clone());
+
+    // 用 30 天天桶窗口聚合各号 credit（尽可能覆盖保留期内的一生用量）
+    let window = StatsQueryWindow::preset(Range::Last30d, StatsGranularity::Day);
+    let by_cred = state
+        .usage_aggregator
+        .query_by_credential(window, None, None);
+    let total_credits: f64 = by_cred.iter().map(|c| c.credits).sum();
+    let my_credits = by_cred
+        .iter()
+        .find(|c| c.credential_id == id)
+        .map(|c| c.credits)
+        .unwrap_or(0.0);
+
+    // 收入按该号 credit 占比 × 全体收入分摊
+    let pricing = state.billing.pricing();
+    let total_revenue = total_pool_revenue(state, window, &pricing);
+    let lifetime_revenue = if total_credits > 0.0 {
+        total_revenue * (my_credits / total_credits)
+    } else {
+        0.0
+    };
+
+    let price = state.billing.account_price(id).unwrap_or(0.0);
+
+    Some(super::billing::ArchivedAccount {
+        id,
+        email,
+        price,
+        lifetime_credits: my_credits,
+        lifetime_revenue,
+        archived_at: Local::now().to_rfc3339(),
+        reason: "手动删除".to_string(),
+    })
+}
+
+/// 按定价把某窗口内各模型用量折算成"有缓存"口径的总收入（× cacheMultiplier）。
+fn total_pool_revenue(
+    state: &AdminState,
+    window: StatsQueryWindow,
+    pricing: &super::billing::Pricing,
+) -> f64 {
+    const M: f64 = 1_000_000.0;
+    let models = state.usage_aggregator.query_by_model(window, None);
+    let raw: f64 = models
+        .iter()
+        .map(|m| {
+            let p = pricing.models.get(&m.model).cloned().unwrap_or_default();
+            (m.input_tokens as f64 / M) * p.input_price
+                + (m.output_tokens as f64 / M) * p.output_price
+                + (m.cache_creation_tokens as f64 / M) * p.cache_write_price
+                + (m.cache_read_tokens as f64 / M) * p.cache_read_price
+        })
+        .sum();
+    raw * pricing.cache_multiplier
 }
 
 /// PUT /api/admin/credentials/:id
@@ -1027,9 +1100,9 @@ pub async fn rotate_client_key(
 
 fn parse_range(params: &std::collections::HashMap<String, String>) -> Result<Range, String> {
     let Some(range) = params.get("range") else {
-        return Err("range 必须是 24h、7d 或 30d".to_string());
+        return Err("range 必须是 1h、24h、7d 或 30d".to_string());
     };
-    Range::parse(range.as_str()).ok_or_else(|| "range 必须是 24h、7d 或 30d".to_string())
+    Range::parse(range.as_str()).ok_or_else(|| "range 必须是 1h、24h、7d 或 30d".to_string())
 }
 
 fn parse_key_id(params: &HashMap<String, String>) -> Result<Option<u64>, String> {
@@ -1222,10 +1295,56 @@ pub async fn stats_by_credential(
                 "inputTokens": d.input_tokens,
                 "outputTokens": d.output_tokens,
                 "errors": d.errors,
+                "credits": d.credits,
             })
         })
         .collect();
     Json(enriched).into_response()
+}
+
+// ============ 计费 / 盈亏 ============
+
+/// GET /api/admin/billing/pricing
+/// 读取定价配置（收入倍率 + 各模型售价）
+pub async fn get_billing_pricing(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.billing.pricing())
+}
+
+/// PUT /api/admin/billing/pricing
+/// 覆盖定价配置
+pub async fn set_billing_pricing(
+    State(state): State<AdminState>,
+    Json(payload): Json<super::billing::Pricing>,
+) -> impl IntoResponse {
+    state.billing.set_pricing(payload);
+    Json(SuccessResponse::new("定价已保存".to_string()))
+}
+
+/// GET /api/admin/billing/account-prices
+/// 读取所有号价（凭据 id -> 号价）
+pub async fn get_account_prices(State(state): State<AdminState>) -> impl IntoResponse {
+    // HashMap<u64, f64> 序列化为对象，键为字符串
+    Json(state.billing.account_prices())
+}
+
+/// PUT /api/admin/billing/account-prices/:id
+/// 设置单个号价
+pub async fn set_account_price(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<super::types::SetAccountPriceRequest>,
+) -> impl IntoResponse {
+    state.billing.set_account_price(id, payload.price);
+    Json(SuccessResponse::new(format!(
+        "凭据 #{} 号价已设置为 {}",
+        id, payload.price
+    )))
+}
+
+/// GET /api/admin/billing/history
+/// 读取历史归档（已删除号的一生盈亏，按归档时间倒序）
+pub async fn get_billing_history(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.billing.history())
 }
 
 /// GET /api/admin/traces

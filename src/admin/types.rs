@@ -100,6 +100,14 @@ pub struct SetPriorityRequest {
     pub priority: u32,
 }
 
+/// 设置号价请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAccountPriceRequest {
+    /// 号价（买这个号花了多少钱）
+    pub price: f64,
+}
+
 /// 添加凭据请求
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -449,6 +449,9 @@ export interface ModelDistribution {
   calls: number
   inputTokens: number
   outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  credits: number
 }
 
 export interface CredentialDistribution {
@@ -458,6 +461,7 @@ export interface CredentialDistribution {
   inputTokens: number
   outputTokens: number
   errors: number
+  credits: number
 }
 
 // ============ 请求链路追踪 ============

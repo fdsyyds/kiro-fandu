@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 
+use super::billing::SharedBillingStore;
 use super::client_keys::SharedClientKeyManager;
 use super::groups::SharedGroupManager;
 use super::service::AdminService;
@@ -35,9 +36,12 @@ pub struct AdminState {
     pub trace_store: SharedTraceStore,
     /// 账号分组注册表（持久化到 groups.json）
     pub groups: SharedGroupManager,
+    /// 计费/盈亏配置（持久化到 billing.json）
+    pub billing: SharedBillingStore,
 }
 
 impl AdminState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         admin_api_key: impl Into<String>,
         service: AdminService,
@@ -45,6 +49,7 @@ impl AdminState {
         usage_aggregator: SharedAggregator,
         trace_store: SharedTraceStore,
         groups: SharedGroupManager,
+        billing: SharedBillingStore,
     ) -> Self {
         Self {
             admin_api_key: Arc::new(RwLock::new(admin_api_key.into())),
@@ -53,6 +58,7 @@ impl AdminState {
             usage_aggregator,
             trace_store,
             groups,
+            billing,
         }
     }
 }

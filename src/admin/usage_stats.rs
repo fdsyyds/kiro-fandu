@@ -235,6 +235,7 @@ struct AggregatorInner {
 /// 预设聚合查询时间范围
 #[derive(Debug, Clone, Copy)]
 pub enum Range {
+    Last1h,
     Last24h,
     Last7d,
     Last30d,
@@ -243,6 +244,7 @@ pub enum Range {
 impl Range {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "1h" => Some(Range::Last1h),
             "24h" => Some(Range::Last24h),
             "7d" => Some(Range::Last7d),
             "30d" => Some(Range::Last30d),
@@ -278,6 +280,7 @@ impl StatsQueryWindow {
     pub fn preset(range: Range, granularity: StatsGranularity) -> Self {
         let now = Utc::now().timestamp();
         let start_ts = match range {
+            Range::Last1h => now - 3600,
             Range::Last24h => now - 24 * 3600,
             Range::Last7d => now - 7 * 24 * 3600,
             Range::Last30d => now - 30 * 24 * 3600,
@@ -313,6 +316,9 @@ pub struct ModelDistribution {
     pub calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub credits: f64,
 }
 
 /// 上游凭据分布
@@ -324,6 +330,7 @@ pub struct CredentialDistribution {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub errors: u64,
+    pub credits: f64,
 }
 
 /// 概览：今日 + 累计
@@ -490,10 +497,7 @@ impl UsageAggregator {
                 continue;
             };
             for (model, stats) in group {
-                let entry = acc.entry(model.clone()).or_default();
-                entry.input_tokens += stats.input_tokens;
-                entry.output_tokens += stats.output_tokens;
-                entry.calls += stats.calls;
+                acc.entry(model.clone()).or_default().add_stats(stats);
             }
         }
         let mut out: Vec<ModelDistribution> = acc
@@ -503,6 +507,9 @@ impl UsageAggregator {
                 calls: stats.calls,
                 input_tokens: stats.input_tokens,
                 output_tokens: stats.output_tokens,
+                cache_creation_tokens: stats.cache_creation_tokens,
+                cache_read_tokens: stats.cache_read_tokens,
+                credits: stats.credits,
             })
             .collect();
         out.sort_by(|a, b| b.calls.cmp(&a.calls));
@@ -529,11 +536,7 @@ impl UsageAggregator {
                         continue;
                     }
                 }
-                let entry = acc.entry(*id).or_default();
-                entry.input_tokens += stats.input_tokens;
-                entry.output_tokens += stats.output_tokens;
-                entry.calls += stats.calls;
-                entry.errors += stats.errors;
+                acc.entry(*id).or_default().add_stats(stats);
             }
         }
         let mut out: Vec<CredentialDistribution> = acc
@@ -544,6 +547,7 @@ impl UsageAggregator {
                 input_tokens: stats.input_tokens,
                 output_tokens: stats.output_tokens,
                 errors: stats.errors,
+                credits: stats.credits,
             })
             .collect();
         out.sort_by(|a, b| b.calls.cmp(&a.calls));
