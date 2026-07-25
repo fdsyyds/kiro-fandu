@@ -21,7 +21,7 @@ import {
   useAccountThrottleConfig, useSetAccountThrottleConfig,
 } from '@/hooks/use-credentials'
 import { useUpdateCheck } from '@/hooks/use-update-check'
-import { updateAdminKey } from '@/api/credentials'
+import { updateAdminKey, type LoadBalancingMode } from '@/api/credentials'
 import { extractErrorMessage, generateApiKey } from '@/lib/utils'
 import { ImageUpdateDialog } from '@/components/image-update-dialog'
 
@@ -58,9 +58,13 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
 
   const handleToggleLoadBalancing = () => {
     const cur = loadBalancingData?.mode || 'priority'
-    const next = cur === 'priority' ? 'balanced' : 'priority'
+    // 三态循环：优先级 → 均衡 → 分层轮询 → 优先级
+    const next =
+      cur === 'priority' ? 'balanced' : cur === 'balanced' ? 'tiered' : 'priority'
+    const label =
+      next === 'priority' ? '优先级模式' : next === 'balanced' ? '均衡负载模式' : '分层轮询模式'
     setLoadBalancingMode(next, {
-      onSuccess: () => toast.success(`已切换到${next === 'priority' ? '优先级模式' : '均衡负载模式'}`),
+      onSuccess: () => toast.success(`已切换到${label}`),
       onError: (err) => toast.error(`切换失败: ${extractErrorMessage(err)}`),
     })
   }
@@ -118,6 +122,12 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
       setThrottleConfig({ cooldownSecs: secs }, {
         onSuccess: () =>
           toast.success(`冷却时长已设为 ${Math.round(secs / 60)} 分钟`),
+        onError: (err) => toast.error(`保存失败: ${extractErrorMessage(err)}`),
+      }),
+    updateBackoffBase: (secs: number) =>
+      setThrottleConfig({ rateLimitBackoffBaseSecs: secs }, {
+        onSuccess: () =>
+          toast.success(`普通 429 基础冷却已设为 ${secs} 秒（序列 ${secs} → ${secs * 2} → ${secs * 4}s）`),
         onError: (err) => toast.error(`保存失败: ${extractErrorMessage(err)}`),
       }),
   }
@@ -229,10 +239,11 @@ interface ToolControls {
   isLoadingThrottle: boolean
   isSettingMode: boolean
   isSettingThrottle: boolean
-  loadBalancingMode?: 'priority' | 'balanced'
+  loadBalancingMode?: LoadBalancingMode
   openImageUpdate: () => void
   openKeyDialog: () => void
-  throttleConfig?: { failover: boolean; cooldownSecs: number }
+  throttleConfig?: { failover: boolean; cooldownSecs: number; rateLimitBackoffBaseSecs: number }
+  updateBackoffBase: (secs: number) => void
   updateCheck?: { hasUpdate: boolean; latestVersion: string; currentVersion: string }
   updateCooldown: (secs: number) => void
 }
@@ -247,6 +258,7 @@ function FullTools({ controls }: { controls: ToolControls }) {
         saving={controls.isSettingThrottle}
         onToggleFailover={controls.handleToggleFailover}
         onChangeCooldown={controls.updateCooldown}
+        onChangeBackoffBase={controls.updateBackoffBase}
       />
       <RefreshButton onRefresh={controls.handleRefresh} />
       <ImageUpdateButton controls={controls} />
@@ -262,6 +274,7 @@ function CompactTools({ controls }: { controls: ToolControls }) {
     saving: controls.isSettingThrottle,
     onToggleFailover: controls.handleToggleFailover,
     onChangeCooldown: controls.updateCooldown,
+    onChangeBackoffBase: controls.updateBackoffBase,
   }
 
   return (
@@ -280,9 +293,7 @@ function CompactTools({ controls }: { controls: ToolControls }) {
           <Activity />
           {controls.isLoadingMode
             ? '负载均衡加载中'
-            : controls.loadBalancingMode === 'priority'
-              ? '切换到均衡负载'
-              : '切换到优先级'}
+            : `负载均衡：${loadBalancingLabel(controls.loadBalancingMode)}（点击切换）`}
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={controls.handleRefresh}>
           <RefreshCw />刷新数据
@@ -300,6 +311,13 @@ function CompactTools({ controls }: { controls: ToolControls }) {
   )
 }
 
+// 负载均衡模式的短标签（用于按钮 / 菜单显示）
+function loadBalancingLabel(mode?: LoadBalancingMode): string {
+  if (mode === 'balanced') return '均衡负载'
+  if (mode === 'tiered') return '分层轮询'
+  return '优先级'
+}
+
 function LoadBalancingButton({ controls }: { controls: ToolControls }) {
   return (
     <Button
@@ -307,15 +325,11 @@ function LoadBalancingButton({ controls }: { controls: ToolControls }) {
       size="sm"
       onClick={controls.handleToggleLoadBalancing}
       disabled={controls.isLoadingMode || controls.isSettingMode}
-      title="切换负载均衡模式"
+      title="切换负载均衡模式（优先级 → 均衡 → 分层轮询）"
     >
       <Activity className="h-3.5 w-3.5" />
       <span className="hidden md:inline">
-        {controls.isLoadingMode
-          ? '加载中…'
-          : controls.loadBalancingMode === 'priority'
-            ? '优先级'
-            : '均衡负载'}
+        {controls.isLoadingMode ? '加载中…' : loadBalancingLabel(controls.loadBalancingMode)}
       </span>
     </Button>
   )
@@ -377,17 +391,19 @@ function UpdateDot() {
 }
 
 interface ThrottleConfigButtonProps {
-  config?: { failover: boolean; cooldownSecs: number }
+  config?: { failover: boolean; cooldownSecs: number; rateLimitBackoffBaseSecs: number }
   loading: boolean
   saving: boolean
   onToggleFailover: () => void
   onChangeCooldown: (secs: number) => void
+  onChangeBackoffBase: (secs: number) => void
 }
 
 interface ThrottleState {
   cooldownMin: number
   cooldownSecs: number
   failover: boolean
+  backoffBaseSecs: number
 }
 
 interface CustomCooldownFormProps {
@@ -417,6 +433,12 @@ const SECONDS_PER_MINUTE = 60
 const MIN_CUSTOM_COOLDOWN_MINUTES = 1
 const MAX_CUSTOM_COOLDOWN_MINUTES = 1440
 
+// 普通 429 指数退避基础冷却 x（秒）：序列 x → 2x → 4x（封顶 4x）。
+const DEFAULT_BACKOFF_BASE_SECS = 1
+const MIN_BACKOFF_BASE_SECS = 1
+const MAX_BACKOFF_BASE_SECS = 3600
+const BACKOFF_BASE_PRESETS = [1, 2, 5, 10, 30]
+
 /**
  * 故障转移开关 + 冷却时长设置（紧凑下拉）
  *
@@ -425,7 +447,7 @@ const MAX_CUSTOM_COOLDOWN_MINUTES = 1440
  * - 5 个预设时长 + 一个自定义输入（分钟）
  */
 function ThrottleConfigButton({
-  config, loading, saving, onToggleFailover, onChangeCooldown,
+  config, loading, saving, onToggleFailover, onChangeCooldown, onChangeBackoffBase,
 }: ThrottleConfigButtonProps) {
   const [open, setOpen] = useState(false)
   const [customMin, setCustomMin] = useState('')
@@ -465,6 +487,11 @@ function ThrottleConfigButton({
           onCustomMinChange={setCustomMin}
           onDone={() => setOpen(false)}
           onSubmitCustom={submitCustom}
+        />
+        <BackoffBasePanel
+          saving={saving}
+          state={state}
+          onChangeBackoffBase={onChangeBackoffBase}
         />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -598,8 +625,86 @@ function CustomCooldownForm({
   )
 }
 
+/**
+ * 普通 429 指数退避基础冷却 x（秒）设置面板。
+ *
+ * 与账号级风控冷却分离、独立生效（不受 failover 开关影响）：普通限流命中时
+ * 该号短时冷却并换号，序列 x → 2x → 4x（封顶 4x）。这里只调基数 x。
+ */
+function BackoffBasePanel({
+  saving, state, onChangeBackoffBase,
+}: {
+  saving: boolean
+  state: ThrottleState
+  onChangeBackoffBase: (secs: number) => void
+}) {
+  const [customSecs, setCustomSecs] = useState('')
+  const cur = state.backoffBaseSecs
+
+  const submitCustom = (e: React.FormEvent) => {
+    e.preventDefault()
+    const secs = parseInt(customSecs, 10)
+    if (Number.isNaN(secs) || secs < MIN_BACKOFF_BASE_SECS || secs > MAX_BACKOFF_BASE_SECS) {
+      toast.error(`请输入 ${MIN_BACKOFF_BASE_SECS}-${MAX_BACKOFF_BASE_SECS} 之间的秒数`)
+      return
+    }
+    onChangeBackoffBase(secs)
+    setCustomSecs('')
+  }
+
+  return (
+    <>
+      <DropdownMenuLabel className="pt-1">普通 429 退避基数 x</DropdownMenuLabel>
+      <div className="px-2 pb-2">
+        <div className="mb-1.5 text-xs text-muted-foreground leading-snug">
+          限流时短时冷却并换号，冷却序列 {cur} → {cur * 2} → {cur * 4}s（封顶 4x）
+        </div>
+        <div className="grid grid-cols-5 gap-1">
+          {BACKOFF_BASE_PRESETS.map((secs) => (
+            <Button
+              key={secs}
+              type="button"
+              size="sm"
+              variant={secs === cur ? 'default' : 'outline'}
+              className="h-7 text-xs"
+              disabled={saving}
+              onClick={() => {
+                if (secs !== cur) onChangeBackoffBase(secs)
+              }}
+            >
+              {secs}s
+            </Button>
+          ))}
+        </div>
+        <form onSubmit={submitCustom} className="mt-2 flex items-center gap-1.5">
+          <Input
+            type="number"
+            min={MIN_BACKOFF_BASE_SECS}
+            max={MAX_BACKOFF_BASE_SECS}
+            placeholder={`自定义（当前 ${cur}）`}
+            value={customSecs}
+            onChange={(e) => setCustomSecs(e.target.value)}
+            disabled={saving}
+            className="h-7 text-xs"
+          />
+          <span className="text-xs text-muted-foreground">秒</span>
+          <Button
+            type="submit"
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            disabled={saving || !customSecs.trim()}
+          >
+            保存
+          </Button>
+        </form>
+      </div>
+    </>
+  )
+}
+
 function ThrottleCompactItems(props: ThrottleConfigButtonProps) {
-  const { loading, saving, onToggleFailover, onChangeCooldown } = props
+  const { loading, saving, onToggleFailover, onChangeCooldown, onChangeBackoffBase } = props
   const [customMin, setCustomMin] = useState('')
   const state = readThrottleState(props.config)
   const busy = loading || saving
@@ -632,6 +737,11 @@ function ThrottleCompactItems(props: ThrottleConfigButtonProps) {
         onChangeCooldown={onChangeCooldown}
         onCustomMinChange={setCustomMin}
         onSubmitCustom={submitCustom}
+      />
+      <BackoffBasePanel
+        saving={busy}
+        state={state}
+        onChangeBackoffBase={onChangeBackoffBase}
       />
     </>
   )
@@ -701,6 +811,7 @@ function readThrottleState(
     cooldownMin: secondsToMinutes(cooldownSecs),
     cooldownSecs,
     failover: config?.failover ?? true,
+    backoffBaseSecs: config?.rateLimitBackoffBaseSecs ?? DEFAULT_BACKOFF_BASE_SECS,
   }
 }
 

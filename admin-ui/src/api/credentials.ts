@@ -400,21 +400,26 @@ export async function assignProxiesRoundRobin(
   return data
 }
 
+// 负载均衡模式：优先级 / 均衡 / 分层轮询
+export type LoadBalancingMode = 'priority' | 'balanced' | 'tiered'
+
 // 获取负载均衡模式
-export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'balanced' }> {
-  const { data } = await api.get<{ mode: 'priority' | 'balanced' }>('/config/load-balancing')
+export async function getLoadBalancingMode(): Promise<{ mode: LoadBalancingMode }> {
+  const { data } = await api.get<{ mode: LoadBalancingMode }>('/config/load-balancing')
   return data
 }
 
 // 设置负载均衡模式
-export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
-  const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+export async function setLoadBalancingMode(mode: LoadBalancingMode): Promise<{ mode: LoadBalancingMode }> {
+  const { data } = await api.put<{ mode: LoadBalancingMode }>('/config/load-balancing', { mode })
   return data
 }
 
 export interface AccountThrottleConfig {
   failover: boolean
   cooldownSecs: number
+  // 普通 429 指数退避基础冷却 x（秒），序列 x → 2x → 4x（封顶 4x）
+  rateLimitBackoffBaseSecs: number
 }
 
 // 获取账号级风控故障转移配置

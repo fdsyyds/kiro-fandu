@@ -712,6 +712,47 @@ impl KiroProvider {
                 continue;
             }
 
+            // 普通 429（限流，非账号级风控）：指数退避短时冷却 + 立即换号。
+            // 与账号级风控彻底分离——不累加 failure_count、不永久禁用，冷却序列
+            // x → 2x → 4x（封顶 4x，x 前端可配）。冷却完自动恢复。高并发榨额度场景下
+            // 这让被限流的号短暂让位、把并发甩给同层其它空闲号，而不是原地死磕。
+            if status.as_u16() == 429 {
+                let base_secs = self.token_manager.get_rate_limit_backoff_base_secs();
+                let remaining = self.token_manager.report_rate_limited_for_request(
+                    ctx.id,
+                    base_secs,
+                    model.as_deref(),
+                    group,
+                );
+                tracing::warn!(
+                    "API 请求失败（普通 429 限流，凭据 #{} 短时冷却并换号，尝试 {}/{}，剩余可用 {}）: {}",
+                    ctx.id,
+                    attempt + 1,
+                    max_retries,
+                    remaining,
+                    body
+                );
+                Self::emit_attempt(
+                    sink, attempt, ctx.id, endpoint_name, Some(429),
+                    outcome::TRANSIENT, Some(&body), attempt_start,
+                );
+
+                // 构造限流错误：优先遵守上游明确的 Retry-After。
+                let rl_error = rate_limit_error
+                    .unwrap_or_else(|| UpstreamRateLimitError::new(None));
+                // 上游给出明确等待时间时立即交给客户端遵守，不在本请求内继续换号重试。
+                if !rl_error.should_retry_locally() {
+                    return Err(rl_error.into());
+                }
+                // 本请求范围内已无其它可用号（全部禁用/冷却）：返回限流错误。
+                if remaining == 0 {
+                    return Err(rl_error.into());
+                }
+                // 仍有可用号：换号重试（acquire_context 会跳过刚冷却的本号）。
+                last_error = Some(rl_error.into());
+                continue;
+            }
+
             // 客户端请求格式错误（messages 数组违反协议）：根因在调用方，重试无意义
             // 上游常以 5xx 返回，必须在下方"瞬态错误重试"分支之前拦截，否则会被当作
             // 上游故障重试 max_retries 次，把一个坏请求放大成多次 503（503 风暴）。
@@ -751,9 +792,10 @@ impl KiroProvider {
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
 
-            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
-            // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+            // 408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
+            // （避免 502 high load 等瞬态错误把所有凭据锁死）
+            // 注意：429 已在上面的账号级风控 / 普通 429 分支处理并 continue，不会到达这里。
+            if status.as_u16() == 408 || status.is_server_error() {
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -765,27 +807,14 @@ impl KiroProvider {
                     sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
                     outcome::TRANSIENT, Some(&body), attempt_start,
                 );
-                last_error = if let Some(rate_limit) = rate_limit_error {
-                    if !rate_limit.should_retry_locally() {
-                        return Err(rate_limit.into());
-                    }
-                    Some(rate_limit.into())
-                } else {
-                    Some(anyhow::anyhow!(
-                        "{} API 请求失败: {} {}",
-                        api_type,
-                        status,
-                        body
-                    ))
-                };
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
                 if attempt + 1 < max_retries {
-                    // 429 限流用更长退避给账号配额恢复时间；408/5xx 仍用通用快速退避
-                    let delay = if status.as_u16() == 429 {
-                        Self::retry_delay_throttle(attempt)
-                    } else {
-                        Self::retry_delay(attempt)
-                    };
-                    sleep(delay).await;
+                    sleep(Self::retry_delay(attempt)).await;
                 }
                 continue;
             }

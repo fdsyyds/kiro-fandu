@@ -125,7 +125,7 @@ pub struct Config {
     #[serde(default = "default_update_auto_apply_time")]
     pub update_auto_apply_time: String,
 
-    /// 负载均衡模式（"priority" 或 "balanced"）
+    /// 负载均衡模式（"priority" / "balanced" / "tiered"）
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
@@ -140,6 +140,15 @@ pub struct Config {
     /// 账号级风控冷却时长（秒，默认 1800 = 30 分钟）。
     #[serde(default = "default_account_throttle_cooldown_secs")]
     pub account_throttle_cooldown_secs: u64,
+
+    /// 普通 429 限流的指数退避基础冷却时长（秒，即 `x`，默认 1）。
+    ///
+    /// 与账号级风控（`account_throttle_cooldown_secs`）完全分离：普通 429 命中时
+    /// 该号短时冷却并换号，冷却序列为 `x → 2x → 4x`（第 4 次及以后封顶 4x）。
+    /// 距上次普通 429 超过 60 秒则计数重置回 `x`；成功一次立即清零。
+    /// 普通 429 不累加失败次数、不永久禁用，仅临时冷却。
+    #[serde(default = "default_rate_limit_backoff_base_secs")]
+    pub rate_limit_backoff_base_secs: u64,
 
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
@@ -228,6 +237,10 @@ fn default_account_throttle_cooldown_secs() -> u64 {
     30 * 60
 }
 
+fn default_rate_limit_backoff_base_secs() -> u64 {
+    1
+}
+
 fn default_update_auto_apply_time() -> String {
     "03:00".to_string()
 }
@@ -284,6 +297,7 @@ impl Default for Config {
             update_auto_apply_time: default_update_auto_apply_time(),
             load_balancing_mode: default_load_balancing_mode(),
             account_throttle_failover: default_account_throttle_failover(),
+            rate_limit_backoff_base_secs: default_rate_limit_backoff_base_secs(),
             account_throttle_cooldown_secs: default_account_throttle_cooldown_secs(),
             extract_thinking: default_extract_thinking(),
             tool_compatibility_mode: default_tool_compatibility_mode(),

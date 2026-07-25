@@ -13,7 +13,7 @@ use tokio::sync::Mutex as TokioMutex;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
@@ -888,10 +888,17 @@ struct CredentialEntry {
     success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
-    /// 临时冷却到期时间（账号级 429 风控触发后短期跳过该凭据）
+    /// 临时冷却到期时间（账号级 429 风控 / 普通 429 退避触发后短期跳过该凭据）
     /// `Some(t)` 且 `t > now()` 时视为不可用；`t <= now()` 时自动恢复。
     /// 不持久化，进程重启后清空。
     throttled_until: Option<Instant>,
+    /// 普通 429 限流的连续命中计数（用于指数退避 x → 2x → 4x）。
+    /// 成功一次清零；距上次普通 429 超过退避窗口（60s）时重置回 1。
+    /// 不持久化，进程重启后清空。仅普通 429 使用，与账号级风控分离。
+    rl429_count: u32,
+    /// 上次普通 429 命中时间，用于判断是否超出退避窗口需要重置计数。
+    /// 不持久化，进程重启后清空。
+    rl429_last: Option<Instant>,
 }
 
 /// 禁用原因
@@ -1026,6 +1033,12 @@ pub struct MultiTokenManager {
     account_throttle_failover: AtomicBool,
     /// 账号级风控冷却时长（秒，运行时可修改）
     account_throttle_cooldown_secs: AtomicU64,
+    /// 普通 429 指数退避基础冷却时长 `x`（秒，运行时可修改）。
+    /// 冷却序列 x → 2x → 4x（封顶 4x），与账号级风控分离。
+    rate_limit_backoff_base_secs: AtomicU64,
+    /// tiered 模式的全局轮询指针（层内 round-robin，fetch_add 取模）。
+    /// 未使用分组功能，单个全局计数器即可保证层内均匀分发。
+    rr_counter: AtomicUsize,
     /// 最近一次统计持久化时间（用于 debounce）
     last_stats_save_at: Mutex<Option<Instant>>,
     /// 统计数据是否有未落盘更新
@@ -1036,6 +1049,10 @@ pub struct MultiTokenManager {
 const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 /// 统计数据持久化防抖间隔
 const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
+/// 普通 429 指数退避的窗口（秒）：距上次普通 429 超过此值则计数重置回 1。
+const RL429_BACKOFF_WINDOW_SECS: u64 = 60;
+/// 普通 429 退避的最大倍数指数：冷却 = x * 2^min(count-1, 2)，即封顶 4x。
+const RL429_BACKOFF_MAX_SHIFT: u32 = 2;
 
 /// API 调用上下文
 ///
@@ -1135,6 +1152,8 @@ impl MultiTokenManager {
                     success_count: 0,
                     last_used_at: None,
                     throttled_until: None,
+                    rl429_count: 0,
+                    rl429_last: None,
                 }
             })
             .collect();
@@ -1182,6 +1201,7 @@ impl MultiTokenManager {
         let load_balancing_mode = config.load_balancing_mode.clone();
         let throttle_failover = config.account_throttle_failover;
         let throttle_cooldown_secs = config.account_throttle_cooldown_secs;
+        let rate_limit_backoff_base_secs = config.rate_limit_backoff_base_secs;
         let manager = Self {
             config,
             proxy: Mutex::new(proxy),
@@ -1195,6 +1215,8 @@ impl MultiTokenManager {
             load_balancing_mode: Mutex::new(load_balancing_mode),
             account_throttle_failover: AtomicBool::new(throttle_failover),
             account_throttle_cooldown_secs: AtomicU64::new(throttle_cooldown_secs),
+            rate_limit_backoff_base_secs: AtomicU64::new(rate_limit_backoff_base_secs),
+            rr_counter: AtomicUsize::new(0),
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
         };
@@ -1270,6 +1292,7 @@ impl MultiTokenManager {
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
     /// - balanced 模式：均衡选择可用凭据
+    /// - tiered 模式：取最高优先层（priority 最小的那批），层内全局指针轮询
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
@@ -1313,6 +1336,24 @@ impl MultiTokenManager {
 
                 Some((entry.id, entry.credentials.clone()))
             }
+            "tiered" => {
+                // 分层轮询：只在最高优先层（priority 最小的那批可用号）内轮询。
+                // 严格分层——只要当前层还有一个可用，就绝不动更低层的号。整层全部
+                // 禁用/冷却时，min_priority 自然落到下一个仍有可用号的层，实现下移；
+                // 上层任一号冷却结束后又会重新成为 min_priority 层，自动切回。
+                let min_priority = available
+                    .iter()
+                    .map(|e| e.credentials.priority)
+                    .min()?;
+                let tier: Vec<_> = available
+                    .iter()
+                    .filter(|e| e.credentials.priority == min_priority)
+                    .collect();
+                // 全局原子指针取模轮询，层内均匀分发、无惊群。
+                let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % tier.len();
+                let entry = tier[idx];
+                Some((entry.id, entry.credentials.clone()))
+            }
             _ => {
                 // priority 模式（默认）：选择优先级最高的
                 let entry = available.iter().min_by_key(|e| e.credentials.priority)?;
@@ -1346,11 +1387,16 @@ impl MultiTokenManager {
             }
 
             let (id, credentials) = {
-                let is_balanced = self.load_balancing_mode.lock().as_str() == "balanced";
+                // balanced / tiered 模式都不粘 current_id：每次请求都重新选择，
+                // 以实现高并发下的层内轮询 / 均衡分发。priority 模式才走粘性。
+                let non_sticky = matches!(
+                    self.load_balancing_mode.lock().as_str(),
+                    "balanced" | "tiered"
+                );
 
-                // balanced 模式：每次请求都重新均衡选择，不固定 current_id
+                // 非粘性模式：每次请求都重新选择，不固定 current_id
                 // priority 模式：优先使用 current_id 指向的凭据
-                let current_hit = if is_balanced {
+                let current_hit = if non_sticky {
                     None
                 } else {
                     let entries = self.entries.lock();
@@ -1873,6 +1919,9 @@ impl MultiTokenManager {
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
                 // 成功 = 风控已解除，提前结束冷却
                 entry.throttled_until = None;
+                // 成功一次立即清零普通 429 退避计数（下次 429 从 x 重新起算）
+                entry.rl429_count = 0;
+                entry.rl429_last = None;
                 tracing::debug!(
                     "凭据 #{} API 调用成功（累计 {} 次）",
                     id,
@@ -2315,6 +2364,75 @@ impl MultiTokenManager {
         }
     }
 
+    /// 标记凭据命中普通 429 限流（非账号级风控），按指数退避进入短时冷却。
+    ///
+    /// 与 [`report_account_throttled_for_request`] 分离：普通 429 只是瞬时限流，
+    /// 不代表账号失效或额度耗尽，故 **不累加 `failure_count`、不永久禁用**，仅短时
+    /// 冷却后自动恢复，并立即换号重试（榨额度场景下把并发甩给同层其它空闲号）。
+    ///
+    /// 退避规则（每个号独立计数）：
+    /// - 距上次普通 429 超过 [`RL429_BACKOFF_WINDOW_SECS`]（60s）→ 计数重置为 1。
+    /// - 否则计数 +1。
+    /// - 冷却秒数 = `base_secs * 2^min(count-1, RL429_BACKOFF_MAX_SHIFT)`，即 x → 2x → 4x，封顶 4x。
+    /// - 成功一次由 [`report_success`] 清零计数。
+    ///
+    /// `base_secs` 为 0 时按 1 处理（避免冷却为 0 导致空转）。返回本请求范围内
+    /// （匹配 model/group、未禁用、未在冷却）的剩余可用凭据数，供调用方决定
+    /// 是继续换号重试还是返回限流错误。
+    pub fn report_rate_limited_for_request(
+        &self,
+        id: u64,
+        base_secs: u64,
+        model: Option<&str>,
+        group: Option<&str>,
+    ) -> usize {
+        let now = Instant::now();
+        let base = base_secs.max(1);
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                // 窗口外则重置计数，窗口内则递增。
+                let within_window = entry
+                    .rl429_last
+                    .map(|t| now.duration_since(t).as_secs() < RL429_BACKOFF_WINDOW_SECS)
+                    .unwrap_or(false);
+                entry.rl429_count = if within_window {
+                    entry.rl429_count.saturating_add(1)
+                } else {
+                    1
+                };
+                entry.rl429_last = Some(now);
+
+                let shift = (entry.rl429_count.saturating_sub(1)).min(RL429_BACKOFF_MAX_SHIFT);
+                let cooldown_secs = base.saturating_mul(1u64 << shift);
+                let until = now + StdDuration::from_secs(cooldown_secs);
+                // 取较晚到期（与账号级风控 / 已有冷却共存时不缩短）。
+                entry.throttled_until = Some(match entry.throttled_until {
+                    Some(prev) if prev > until => prev,
+                    _ => until,
+                });
+                // 普通 429 计入累计失败用于展示，但不动连续 failure_count（不触发永久禁用）。
+                entry.total_failure_count += 1;
+                tracing::warn!(
+                    "凭据 #{} 普通 429 限流（第 {} 次，冷却 {} 秒）",
+                    id,
+                    entry.rl429_count,
+                    cooldown_secs
+                );
+            }
+
+            let throttled_now = Instant::now();
+            entries
+                .iter()
+                .filter(|e| {
+                    !e.disabled
+                        && !e.throttled_until.map(|t| t > throttled_now).unwrap_or(false)
+                        && credential_matches_request(&e.credentials, model, group)
+                })
+                .count()
+        }
+    }
+
     /// 手动解除指定凭据的临时冷却（Admin API）
     ///
     /// 即使冷却尚未到期也立即清除，让该凭据重新参与调度。
@@ -2325,6 +2443,8 @@ impl MultiTokenManager {
             .find(|e| e.id == id)
             .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
         entry.throttled_until = None;
+        entry.rl429_count = 0;
+        entry.rl429_last = None;
         tracing::info!("凭据 #{} 风控冷却已被手动解除", id);
         Ok(())
     }
@@ -2970,6 +3090,8 @@ impl MultiTokenManager {
                 success_count: 0,
                 last_used_at: None,
                 throttled_until: None,
+                rl429_count: 0,
+                rl429_last: None,
             });
         }
 
@@ -3310,7 +3432,7 @@ impl MultiTokenManager {
     /// 设置负载均衡模式（Admin API）
     pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
         // 验证模式值
-        if mode != "priority" && mode != "balanced" {
+        if mode != "priority" && mode != "balanced" && mode != "tiered" {
             anyhow::bail!("无效的负载均衡模式: {}", mode);
         }
 
@@ -3404,6 +3526,58 @@ impl MultiTokenManager {
         config
             .save()
             .with_context(|| format!("持久化账号级风控配置失败: {}", config_path.display()))?;
+
+        Ok(())
+    }
+
+    /// 获取普通 429 指数退避基础冷却秒数 `x`（Admin API）
+    pub fn get_rate_limit_backoff_base_secs(&self) -> u64 {
+        self.rate_limit_backoff_base_secs.load(Ordering::Relaxed)
+    }
+
+    /// 设置普通 429 指数退避基础冷却秒数 `x`（Admin API），并持久化。
+    ///
+    /// 冷却序列 x → 2x → 4x（封顶 4x）。限定 1..=3600 秒。持久化失败会回滚内存值。
+    pub fn set_rate_limit_backoff_base_secs(&self, base_secs: u64) -> anyhow::Result<()> {
+        if !(1..=3600).contains(&base_secs) {
+            anyhow::bail!("基础冷却时长必须在 1..=3600 秒内: {}", base_secs);
+        }
+
+        let prev = self.get_rate_limit_backoff_base_secs();
+        if prev == base_secs {
+            return Ok(());
+        }
+
+        self.rate_limit_backoff_base_secs
+            .store(base_secs, Ordering::Relaxed);
+
+        if let Err(err) = self.persist_rate_limit_backoff_base_secs(base_secs) {
+            self.rate_limit_backoff_base_secs
+                .store(prev, Ordering::Relaxed);
+            return Err(err);
+        }
+
+        tracing::info!("普通 429 退避基础冷却已设置为: {} 秒", base_secs);
+        Ok(())
+    }
+
+    fn persist_rate_limit_backoff_base_secs(&self, base_secs: u64) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        let config_path = match self.config.config_path() {
+            Some(path) => path.to_path_buf(),
+            None => {
+                tracing::warn!("配置文件路径未知，普通 429 退避配置仅在当前进程生效");
+                return Ok(());
+            }
+        };
+
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))?;
+        config.rate_limit_backoff_base_secs = base_secs;
+        config
+            .save()
+            .with_context(|| format!("持久化普通 429 退避配置失败: {}", config_path.display()))?;
 
         Ok(())
     }
@@ -4718,5 +4892,224 @@ mod tests {
 
         // 但 g2 仍可用
         assert!(manager.acquire_context(None, Some("g2")).await.is_ok());
+    }
+
+    // ===== 分层轮询（tiered）模式测试 =====
+
+    /// 构造一个带 token、指定 priority 的可用凭据（无分组）。
+    fn tiered_cred(token: &str, priority: u32) -> KiroCredentials {
+        let mut c = grouped_cred(token, &[]);
+        c.priority = priority;
+        c
+    }
+
+    fn tiered_manager(creds: Vec<KiroCredentials>) -> MultiTokenManager {
+        let mut config = Config::default();
+        config.load_balancing_mode = "tiered".to_string();
+        MultiTokenManager::new(config, creds, None, None, false).unwrap()
+    }
+
+    #[test]
+    fn test_tiered_only_selects_highest_tier() {
+        // 第一层 priority=0：A(id1),B(id2)；第二层 priority=1：C(id3)。
+        let manager = tiered_manager(vec![
+            tiered_cred("a", 0),
+            tiered_cred("b", 0),
+            tiered_cred("c", 1),
+        ]);
+
+        // 反复选择：只应命中第一层的 id∈{1,2}，绝不选到第二层 C(id3)。
+        for _ in 0..20 {
+            let id = manager.select_next_credential(None, None).map(|(id, _)| id);
+            assert!(
+                matches!(id, Some(1) | Some(2)),
+                "tiered 只应在最高层内选择，实际选到 {:?}",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_tiered_round_robin_within_tier() {
+        // 第一层两个号：连续选择应轮询覆盖 id1 与 id2（不粘住一个）。
+        let manager = tiered_manager(vec![tiered_cred("a", 0), tiered_cred("b", 0)]);
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..4 {
+            if let Some((id, _)) = manager.select_next_credential(None, None) {
+                seen.insert(id);
+            }
+        }
+        assert!(
+            seen.contains(&1) && seen.contains(&2),
+            "层内轮询应同时覆盖 id1 与 id2，实际 {:?}",
+            seen
+        );
+    }
+
+    #[test]
+    fn test_tiered_falls_to_next_tier_only_when_top_all_unavailable() {
+        // 第一层 A(id1)；第二层 B(id2)。禁用 A 后才应下移到 B。
+        let manager = tiered_manager(vec![tiered_cred("a", 0), tiered_cred("b", 1)]);
+
+        // 初始：只选第一层 A。
+        assert_eq!(
+            manager.select_next_credential(None, None).map(|(id, _)| id),
+            Some(1)
+        );
+
+        // 禁用第一层唯一号 A → 下移到第二层 B。
+        manager.set_disabled(1, true).unwrap();
+        assert_eq!(
+            manager.select_next_credential(None, None).map(|(id, _)| id),
+            Some(2),
+            "第一层全灭后才允许用第二层"
+        );
+
+        // 重新启用 A → 立即切回第一层。
+        manager.set_disabled(1, false).unwrap();
+        assert_eq!(
+            manager.select_next_credential(None, None).map(|(id, _)| id),
+            Some(1),
+            "第一层恢复后应立即切回上层"
+        );
+    }
+
+    #[test]
+    fn test_tiered_whole_tier_throttled_borrows_lower_then_recovers() {
+        // 第一层 A(id1)；第二层 B(id2)。A 被普通 429 冷却后临时借第二层，冷却清除后回切。
+        let manager = tiered_manager(vec![tiered_cred("a", 0), tiered_cred("b", 1)]);
+
+        // A 命中普通 429 → 冷却，第一层暂时全灭 → 借第二层 B。
+        let remaining = manager.report_rate_limited_for_request(1, 60, None, None);
+        // 仅 B 可用（A 在冷却）。
+        assert_eq!(remaining, 1);
+        assert_eq!(
+            manager.select_next_credential(None, None).map(|(id, _)| id),
+            Some(2),
+            "第一层整层冷却时临时借下一层"
+        );
+
+        // 手动清除冷却（模拟到期）→ 第一层恢复，立即切回 A。
+        manager.clear_throttle(1).unwrap();
+        assert_eq!(
+            manager.select_next_credential(None, None).map(|(id, _)| id),
+            Some(1),
+            "上层冷却结束后立即切回上层"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_backoff_exponential_sequence() {
+        // 普通 429 退避序列：x=2 → 冷却 2,4,8,8（封顶 4x=8）。
+        let manager = tiered_manager(vec![tiered_cred("a", 0), tiered_cred("b", 0)]);
+
+        let cooldown_of = |m: &MultiTokenManager, id: u64| -> u64 {
+            let entries = m.entries.lock();
+            let e = entries.iter().find(|e| e.id == id).unwrap();
+            let until = e.throttled_until.expect("应已进入冷却");
+            // 冷却剩余秒（四舍五入），用于近似断言退避档位。
+            let now = Instant::now();
+            until.saturating_duration_since(now).as_secs()
+        };
+
+        // 第 1 次：x = 2s。
+        manager.report_rate_limited_for_request(1, 2, None, None);
+        let c1 = cooldown_of(&manager, 1);
+        assert!((1..=2).contains(&c1), "第1次应≈2s，实际 {}", c1);
+
+        // 第 2 次（窗口内）：2x = 4s。
+        manager.report_rate_limited_for_request(1, 2, None, None);
+        let c2 = cooldown_of(&manager, 1);
+        assert!((3..=4).contains(&c2), "第2次应≈4s，实际 {}", c2);
+
+        // 第 3 次：4x = 8s。
+        manager.report_rate_limited_for_request(1, 2, None, None);
+        let c3 = cooldown_of(&manager, 1);
+        assert!((7..=8).contains(&c3), "第3次应≈8s，实际 {}", c3);
+
+        // 第 4 次：封顶仍 4x = 8s。
+        manager.report_rate_limited_for_request(1, 2, None, None);
+        let c4 = cooldown_of(&manager, 1);
+        assert!((7..=8).contains(&c4), "第4次应封顶≈8s，实际 {}", c4);
+    }
+
+    #[test]
+    fn test_rate_limit_backoff_resets_on_success() {
+        // 成功一次应清零退避计数：下次 429 从 x 重新起算。
+        let manager = tiered_manager(vec![tiered_cred("a", 0), tiered_cred("b", 0)]);
+
+        // 累到第 3 档（4x）。
+        manager.report_rate_limited_for_request(1, 5, None, None);
+        manager.report_rate_limited_for_request(1, 5, None, None);
+        manager.report_rate_limited_for_request(1, 5, None, None);
+        {
+            let entries = manager.entries.lock();
+            assert_eq!(entries.iter().find(|e| e.id == 1).unwrap().rl429_count, 3);
+        }
+
+        // 成功一次 → 计数清零、冷却清除。
+        manager.report_success(1);
+        {
+            let entries = manager.entries.lock();
+            let e = entries.iter().find(|e| e.id == 1).unwrap();
+            assert_eq!(e.rl429_count, 0);
+            assert!(e.throttled_until.is_none());
+        }
+
+        // 下次 429 从 x 起算（第 1 档）。
+        manager.report_rate_limited_for_request(1, 5, None, None);
+        {
+            let entries = manager.entries.lock();
+            assert_eq!(entries.iter().find(|e| e.id == 1).unwrap().rl429_count, 1);
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_backoff_does_not_permanently_disable() {
+        // 普通 429 不累加 failure_count、不永久禁用（与真死区分）。
+        let manager = tiered_manager(vec![tiered_cred("a", 0)]);
+        for _ in 0..10 {
+            manager.report_rate_limited_for_request(1, 1, None, None);
+        }
+        let entries = manager.entries.lock();
+        let e = entries.iter().find(|e| e.id == 1).unwrap();
+        assert_eq!(e.failure_count, 0, "普通 429 不应累加连续失败次数");
+        assert!(!e.disabled, "普通 429 不应永久禁用");
+    }
+
+    #[tokio::test]
+    async fn test_tiered_new_credential_joins_top_tier_by_priority() {
+        // 中途加号：新号设 priority=0 应立即进最高层参与轮询（无需重启）。
+        // add_credential 走真实校验，故新号带一个合法 refreshToken。
+        let manager = tiered_manager(vec![tiered_cred("a", 0)]);
+
+        // 用 API Key 凭据避免 add_credential 走网络刷新校验。
+        let mut new_cred = KiroCredentials::default();
+        new_cred.kiro_api_key = Some("test-api-key-value".to_string());
+        new_cred.priority = 0;
+        let new_id = manager.add_credential(new_cred).await.unwrap();
+
+        // 反复选择应能覆盖到新号（与既有 id1 同层轮询）。
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10 {
+            if let Some((id, _)) = manager.select_next_credential(None, None) {
+                seen.insert(id);
+            }
+        }
+        assert!(
+            seen.contains(&new_id),
+            "priority=0 的新号应立即进最高层轮询，实际选到 {:?}",
+            seen
+        );
+    }
+
+    #[test]
+    fn test_set_rate_limit_backoff_base_validates_range() {
+        let manager = tiered_manager(vec![tiered_cred("a", 0)]);
+        assert!(manager.set_rate_limit_backoff_base_secs(0).is_err(), "0 越界");
+        assert!(manager.set_rate_limit_backoff_base_secs(3601).is_err(), "3601 越界");
+        assert!(manager.set_rate_limit_backoff_base_secs(5).is_ok());
+        assert_eq!(manager.get_rate_limit_backoff_base_secs(), 5);
     }
 }

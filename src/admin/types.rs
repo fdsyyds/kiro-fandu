@@ -411,7 +411,7 @@ pub struct EnableOverageAllResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadBalancingModeResponse {
-    /// 当前模式（"priority" 或 "balanced"）
+    /// 当前模式（"priority" / "balanced" / "tiered"）
     pub mode: String,
 }
 
@@ -419,7 +419,7 @@ pub struct LoadBalancingModeResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetLoadBalancingModeRequest {
-    /// 模式（"priority" 或 "balanced"）
+    /// 模式（"priority" / "balanced" / "tiered"）
     pub mode: String,
 }
 
@@ -429,8 +429,10 @@ pub struct SetLoadBalancingModeRequest {
 pub struct AccountThrottleConfigResponse {
     /// 是否启用账号级 429 故障转移
     pub failover: bool,
-    /// 冷却时长（秒）
+    /// 账号级风控冷却时长（秒）
     pub cooldown_secs: u64,
+    /// 普通 429 指数退避基础冷却时长 `x`（秒），序列 x → 2x → 4x（封顶 4x）
+    pub rate_limit_backoff_base_secs: u64,
 }
 
 /// 更新账号级风控故障转移配置
@@ -440,9 +442,12 @@ pub struct SetAccountThrottleConfigRequest {
     /// 是否启用故障转移；缺省表示不修改
     #[serde(default)]
     pub failover: Option<bool>,
-    /// 冷却时长（秒）；缺省表示不修改，1..=86400
+    /// 账号级风控冷却时长（秒）；缺省表示不修改，1..=86400
     #[serde(default)]
     pub cooldown_secs: Option<u64>,
+    /// 普通 429 退避基础冷却 `x`（秒）；缺省表示不修改，1..=3600
+    #[serde(default)]
+    pub rate_limit_backoff_base_secs: Option<u64>,
 }
 
 /// 日志治理配置响应

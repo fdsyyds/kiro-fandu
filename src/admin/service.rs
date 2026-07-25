@@ -1834,9 +1834,9 @@ impl AdminService {
         req: SetLoadBalancingModeRequest,
     ) -> Result<LoadBalancingModeResponse, AdminServiceError> {
         // 验证模式值
-        if req.mode != "priority" && req.mode != "balanced" {
+        if req.mode != "priority" && req.mode != "balanced" && req.mode != "tiered" {
             return Err(AdminServiceError::InvalidCredential(
-                "mode 必须是 'priority' 或 'balanced'".to_string(),
+                "mode 必须是 'priority' / 'balanced' / 'tiered'".to_string(),
             ));
         }
 
@@ -1852,6 +1852,9 @@ impl AdminService {
         AccountThrottleConfigResponse {
             failover: self.token_manager.get_account_throttle_failover(),
             cooldown_secs: self.token_manager.get_account_throttle_cooldown_secs(),
+            rate_limit_backoff_base_secs: self
+                .token_manager
+                .get_rate_limit_backoff_base_secs(),
         }
     }
 
@@ -1860,15 +1863,26 @@ impl AdminService {
         &self,
         req: SetAccountThrottleConfigRequest,
     ) -> Result<AccountThrottleConfigResponse, AdminServiceError> {
-        if req.failover.is_none() && req.cooldown_secs.is_none() {
+        if req.failover.is_none()
+            && req.cooldown_secs.is_none()
+            && req.rate_limit_backoff_base_secs.is_none()
+        {
             return Err(AdminServiceError::InvalidCredential(
-                "至少提供 failover 或 cooldownSecs 一个字段".to_string(),
+                "至少提供 failover / cooldownSecs / rateLimitBackoffBaseSecs 一个字段".to_string(),
             ));
         }
 
-        self.token_manager
-            .set_account_throttle_config(req.failover, req.cooldown_secs)
-            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        if req.failover.is_some() || req.cooldown_secs.is_some() {
+            self.token_manager
+                .set_account_throttle_config(req.failover, req.cooldown_secs)
+                .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        }
+
+        if let Some(base_secs) = req.rate_limit_backoff_base_secs {
+            self.token_manager
+                .set_rate_limit_backoff_base_secs(base_secs)
+                .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        }
 
         Ok(self.get_account_throttle_config())
     }

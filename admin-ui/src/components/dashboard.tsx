@@ -1063,12 +1063,17 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
 
   const handleToggleLoadBalancing = () => {
     const cur = loadBalancingData?.mode || "priority";
-    const next = cur === "priority" ? "balanced" : "priority";
+    // 三态循环：优先级 → 均衡 → 分层轮询 → 优先级
+    const next =
+      cur === "priority" ? "balanced" : cur === "balanced" ? "tiered" : "priority";
+    const label =
+      next === "priority"
+        ? "优先级模式"
+        : next === "balanced"
+          ? "均衡负载模式"
+          : "分层轮询模式";
     setLoadBalancingMode(next, {
-      onSuccess: () =>
-        toast.success(
-          `已切换到${next === "priority" ? "优先级模式" : "均衡负载模式"}`,
-        ),
+      onSuccess: () => toast.success(`已切换到${label}`),
       onError: (err) => toast.error(`切换失败: ${extractErrorMessage(err)}`),
     });
   };
@@ -1126,14 +1131,16 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                 size="sm"
                 onClick={handleToggleLoadBalancing}
                 disabled={isLoadingMode || isSettingMode}
-                title="切换负载均衡模式"
+                title="切换负载均衡模式（优先级 → 均衡 → 分层轮询）"
               >
                 <Activity className="h-3.5 w-3.5" />
                 {isLoadingMode
                   ? "加载中…"
-                  : loadBalancingData?.mode === "priority"
-                    ? "优先级"
-                    : "均衡负载"}
+                  : loadBalancingData?.mode === "balanced"
+                    ? "均衡负载"
+                    : loadBalancingData?.mode === "tiered"
+                      ? "分层轮询"
+                      : "优先级"}
               </Button>
               <Button variant="ghost" size="icon" asChild title="GitHub 仓库">
                 <a
