@@ -38,6 +38,8 @@ import {
 import { useTraces } from '@/hooks/use-traces'
 import { useClientKeys } from '@/hooks/use-client-keys'
 import { useGroupOptions } from '@/hooks/use-groups'
+import { usePricing } from '@/hooks/use-billing'
+import type { Pricing } from '@/api/billing'
 import {
   useLogGovernanceConfig,
   useSetLogGovernanceConfig,
@@ -116,6 +118,32 @@ function formatTokens(n: number): string {
 /** 千位分隔的完整数值（用于明细悬浮框） */
 function formatTokenFull(n: number): string {
   return n.toLocaleString('en-US')
+}
+
+const M = 1_000_000
+
+/** 计算单条请求的用户扣费：模型价格 × token × 倍率 */
+function computeUserCharge(rec: TraceRecord, pricing: Pricing | undefined): number | null {
+  if (!pricing) return null
+  const input = rec.inputTokens ?? 0
+  const output = rec.outputTokens ?? 0
+  const cacheWrite = rec.cacheCreationTokens ?? 0
+  const cacheRead = rec.cacheReadTokens ?? 0
+  if (input + output + cacheWrite + cacheRead === 0) return null
+  const p = pricing.models[rec.model]
+  if (!p) return null
+  const raw =
+    (input / M) * p.inputPrice +
+    (output / M) * p.outputPrice +
+    (cacheWrite / M) * p.cacheWritePrice +
+    (cacheRead / M) * p.cacheReadPrice
+  return raw * pricing.cacheMultiplier
+}
+
+function formatCharge(v: number | null): string {
+  if (v == null || v === 0) return '—'
+  if (v < 0.0001) return '<0.0001'
+  return v.toFixed(4)
 }
 
 function credLabel(id: number, email?: string | null): string {
@@ -228,9 +256,10 @@ function TokenCell({ rec }: { rec: TraceRecord }) {
   )
 }
 
-function TraceRow({ rec }: { rec: TraceRecord }) {
+function TraceRow({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | undefined }) {
   const [open, setOpen] = useState(false)
   const errStyle = rec.errorType ? outcomeStyle(rec.errorType) : null
+  const charge = computeUserCharge(rec, pricing)
   return (
     <>
       <tr
@@ -264,6 +293,9 @@ function TraceRow({ rec }: { rec: TraceRecord }) {
         <td className="py-2.5 pr-3 text-[13px] tabular-nums">
           {rec.credits != null && rec.credits > 0 ? rec.credits.toFixed(4) : '—'}
         </td>
+        <td className="py-2.5 pr-3 text-[13px] tabular-nums">
+          {formatCharge(charge)}
+        </td>
         <td className="py-2.5 pr-3 text-[13px] tabular-nums text-muted-foreground">
           {rec.firstTokenMs != null ? formatDuration(rec.firstTokenMs) : '—'}
         </td>
@@ -295,7 +327,7 @@ function TraceCredentialCell({ rec }: { rec: TraceRecord }) {
 function ExpandedTraceRow({ rec }: { rec: TraceRecord }) {
   return (
     <tr className="border-b border-border/40 bg-secondary/20">
-      <td colSpan={12} className="px-3 py-3">
+      <td colSpan={13} className="px-3 py-3">
         <ExpandedDetail rec={rec} />
       </td>
     </tr>
@@ -485,6 +517,7 @@ export function TraceLogPage() {
   const [page, setPage] = useState(0)
 
   const { data: keysData } = useClientKeys()
+  const { data: pricing } = usePricing()
   const keyOptions = [
     { value: '', label: '全部 Key' },
     ...(keysData?.keys ?? []).map((k) => ({ value: String(k.id), label: k.name })),
@@ -573,6 +606,7 @@ export function TraceLogPage() {
                     <th className="py-2 pr-3 font-medium">最终凭据</th>
                     <th className="py-2 pr-3 font-medium">Token</th>
                     <th className="py-2 pr-3 font-medium">费用</th>
+                    <th className="py-2 pr-3 font-medium">用户扣费</th>
                     <th className="py-2 pr-3 font-medium">首Token</th>
                     <th className="py-2 pr-3 font-medium">错误类型</th>
                     <th className="py-2 pr-3 font-medium">重试</th>
@@ -581,7 +615,7 @@ export function TraceLogPage() {
                 </thead>
                 <tbody>
                   {records.map((rec) => (
-                    <TraceRow key={rec.traceId} rec={rec} />
+                    <TraceRow key={rec.traceId} rec={rec} pricing={pricing} />
                   ))}
                 </tbody>
               </table>

@@ -98,15 +98,11 @@ function modelRevenue(u: ModelUsage, pricing: Pricing) {
   }
 }
 
-/** 本时段成本汇总（口径 B：真实单价 = Σ号价÷Σ已用credit，含死号浪费） */
+/** 本时段成本汇总：每个号独立计算成本后求和 */
 interface WindowCost {
   /** 本时段消耗的总 credit */
   winCredits: number
-  /** 真实每 credit 成本 = Σ号价 ÷ Σ已用 credit（死号浪费自动摊入） */
-  realUnitCost: number
-  /** 所有号已用总 credit（分母） */
-  usedCredits: number
-  /** 成本 = 本时段消耗 credit × 真实每 credit 成本 */
+  /** 成本 = Σ(每个号本时段 credit × 该号单价) */
   cost: number
   /** 号池总投入 = Σ 号价 */
   totalInvest: number
@@ -115,13 +111,14 @@ interface WindowCost {
 function computeWindowCost(accounts: Account[], usage: ModelUsage[]): WindowCost {
   const winCredits = usage.reduce((s, u) => s + u.credits, 0)
   let totalInvest = 0
-  let usedCredits = 0
+  let cost = 0
   for (const a of accounts) {
     totalInvest += a.price
-    usedCredits += a.currentUsage
+    const unitCost = a.usageLimit > 0 ? a.price / a.usageLimit : 0
+    const accountWinCredits = winCredits * a.share
+    cost += accountWinCredits * unitCost
   }
-  const realUnitCost = usedCredits > 0 ? totalInvest / usedCredits : 0
-  return { winCredits, realUnitCost, usedCredits, cost: realUnitCost * winCredits, totalInvest }
+  return { winCredits, cost, totalInvest }
 }
 
 interface ModelRow {
@@ -133,11 +130,13 @@ interface ModelRow {
   noCacheProfit: number
 }
 
-/** 模型成本 = 该模型本时段 credits × 加权平均 credit 单价 */
-function computeRows(usage: ModelUsage[], pricing: Pricing, avgUnitCost: number): ModelRow[] {
+/** 模型成本 = 该模型 credit 占比 × 总成本 */
+function computeRows(usage: ModelUsage[], pricing: Pricing, totalCost: number): ModelRow[] {
+  const totalCredits = usage.reduce((s, u) => s + u.credits, 0)
   return usage.map((u) => {
     const { revenue, noCacheRevenue } = modelRevenue(u, pricing)
-    const cost = u.credits * avgUnitCost
+    const share = totalCredits > 0 ? u.credits / totalCredits : 0
+    const cost = totalCost * share
     return {
       usage: u,
       cost,
@@ -162,7 +161,7 @@ function tokens(v: number): string {
 /** 单个号本时段的盈亏 */
 interface AccountRow {
   account: Account
-  /** 该号 credit 单价（号价/总额度） */
+  /** 该号 credit 单价（号价 / 总额度） */
   unitCost: number
   /** 该号本时段消耗的 credit */
   winCredits: number
@@ -238,7 +237,7 @@ export function BillingPage() {
   }, [historyQ.data])
 
   const cost = useMemo(() => computeWindowCost(accounts, usage), [accounts, usage])
-  const rows = useMemo(() => computeRows(usage, pricing, cost.realUnitCost), [usage, pricing, cost])
+  const rows = useMemo(() => computeRows(usage, pricing, cost.cost), [usage, pricing, cost])
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -256,22 +255,23 @@ export function BillingPage() {
   const margin = totals.revenue > 0 ? (profit / totals.revenue) * 100 : 0
   const noCacheMargin = totals.noCacheRevenue > 0 ? (noCacheProfit / totals.noCacheRevenue) * 100 : 0
 
-  // 每个号本时段的盈亏（口径 B，全局真实单价，可对账到顶部）
+  // 每个号本时段的盈亏：各号独立单价 × 本时段消耗
   const accountRows = useMemo<AccountRow[]>(() => {
     return accounts.map((a) => {
+      const unitCost = a.usageLimit > 0 ? a.price / a.usageLimit : 0
       const winCredits = cost.winCredits * a.share
-      const c = winCredits * cost.realUnitCost
+      const c = winCredits * unitCost
       const rev = totals.revenue * a.share
       return {
         account: a,
-        unitCost: cost.realUnitCost,
+        unitCost,
         winCredits,
         cost: c,
         revenue: rev,
         profit: rev - c,
       }
     })
-  }, [accounts, totals.revenue, cost.winCredits, cost.realUnitCost])
+  }, [accounts, totals.revenue, cost.winCredits])
 
   // 号价编辑：本地不缓存，直接落库（乐观刷新由 react-query invalidate 处理）
   const setPrice = (id: number, price: number) => {
@@ -312,8 +312,7 @@ export function BillingPage() {
           <HeadlineCards revenue={totals.revenue} cost={totalCost} profit={profit} margin={margin} />
           <SummaryCards
             winCredits={cost.winCredits}
-            realUnitCost={cost.realUnitCost}
-            usedCredits={cost.usedCredits}
+            totalCost={totalCost}
             totalInvest={cost.totalInvest}
           />
           <ProfitCards
@@ -353,7 +352,7 @@ function BillingHeader({ range }: { range: BillingRange }) {
     <div className="mb-6">
       <h1 className="text-[28px] font-semibold tracking-tight leading-tight">计费</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        {RANGE_LABEL[range]}：成本 = 本时段消耗 credit × 真实每 credit 成本（Σ号价÷Σ已用）；利润 = 收入 − 成本。
+        {RANGE_LABEL[range]}：成本 = Σ(每个号消耗 credit × 该号单价)；利润 = 收入 − 成本。
       </p>
     </div>
   )
@@ -421,8 +420,7 @@ function RangeTabs({ range, onChange }: { range: BillingRange; onChange: (r: Bil
 
 function SummaryCards(props: {
   winCredits: number
-  realUnitCost: number
-  usedCredits: number
+  totalCost: number
   totalInvest: number
 }) {
   return (
@@ -436,10 +434,10 @@ function SummaryCards(props: {
       />
       <StatCard
         icon={<Coins className="h-4 w-4" />}
-        label="真实每 credit 成本"
-        value={`${CNY}${props.realUnitCost.toFixed(4)}`}
+        label="本时段总成本"
+        value={money(props.totalCost)}
         tone="neutral"
-        sub={`Σ号价 ÷ 已用 ${props.usedCredits.toLocaleString('zh-CN')} credit，含死号浪费`}
+        sub="各号消耗 credit × 各自单价之和"
       />
       <StatCard
         icon={<Wallet className="h-4 w-4" />}
@@ -675,8 +673,8 @@ function AccountPool({
           </table>
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
-          本时段成本 = 该号本时段消耗 credit × 真实每 credit 成本（Σ号价÷Σ已用，全池统一）；收入 = 按该号流量占比分摊总收入；盈亏 = 收入 − 成本。
-          各号盈亏之和 = 顶部利润（可对账）。号价可直接编辑，改动即时反映到真实单价与成本。
+          本时段成本 = 该号本时段消耗 credit × 该号单价（号价÷总额度）；收入 = 按该号流量占比分摊总收入；盈亏 = 收入 − 成本。
+          各号盈亏之和 = 顶部利润（可对账）。号价可直接编辑，改动即时反映到单价与成本。
         </p>
       </CardContent>
     </Card>
