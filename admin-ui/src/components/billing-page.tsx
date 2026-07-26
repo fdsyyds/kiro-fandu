@@ -188,7 +188,7 @@ export function BillingPage() {
   useEffect(() => {
     if (pricingQ.data) setPricingDraft(pricingQ.data)
   }, [pricingQ.data])
-  const pricing: Pricing = pricingDraft ?? { cacheMultiplier: 0.1, noCacheMultiplier: 0.12, models: {} }
+  const pricing: Pricing = pricingDraft ?? { cacheMultiplier: 0.08, noCacheMultiplier: 0.12, cacheReportRatio: 1.0, models: {} }
 
   // by-model → ModelUsage（cacheCreation 记为 cacheWrite）
   const usage = useMemo<ModelUsage[]>(() => {
@@ -767,7 +767,7 @@ function PricingEditor({
   onSave: () => void
   saving: boolean
 }) {
-  const setGlobal = (key: 'cacheMultiplier' | 'noCacheMultiplier', v: number) =>
+  const setGlobal = (key: 'cacheMultiplier' | 'noCacheMultiplier' | 'cacheReportRatio', v: number) =>
     onChange({ ...pricing, [key]: v })
 
   const setModel = (model: string, key: keyof ModelPrice, v: number) => {
@@ -810,7 +810,7 @@ function PricingEditor({
           </Button>
         </div>
 
-        <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
           <PriceField
             label="有缓存倍率"
             suffix="×"
@@ -822,6 +822,12 @@ function PricingEditor({
             suffix="×"
             value={pricing.noCacheMultiplier}
             onChange={(v) => setGlobal('noCacheMultiplier', v)}
+          />
+          <PriceField
+            label="缓存上报比例"
+            suffix="0~1"
+            value={pricing.cacheReportRatio}
+            onChange={(v) => setGlobal('cacheReportRatio', v)}
           />
         </div>
 

@@ -25,6 +25,8 @@ export interface ModelPrice {
 export interface Pricing {
   cacheMultiplier: number
   noCacheMultiplier: number
+  /** 缓存上报比例（0~1）：返回给客户端的 cache_read 按此比例缩减 */
+  cacheReportRatio: number
   models: Record<string, ModelPrice>
 }
 

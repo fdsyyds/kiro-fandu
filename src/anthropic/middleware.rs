@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 
+use crate::admin::billing::SharedBillingStore;
 use crate::admin::client_keys::SharedClientKeyManager;
 use crate::admin::trace_db::{SharedTraceStore, TraceKeySource};
 use crate::admin::usage_stats::{SharedAggregator, SharedRecorder};
@@ -50,6 +51,8 @@ pub struct AppState {
     pub cache_meter: Option<SharedCacheMeter>,
     /// 请求链路追踪存储（SQLite，可选）
     pub trace_store: Option<SharedTraceStore>,
+    /// 计费配置存储（可选，用于读取 cache_report_ratio）
+    pub billing_store: Option<SharedBillingStore>,
 }
 
 impl AppState {
@@ -68,6 +71,7 @@ impl AppState {
             usage_aggregator: None,
             cache_meter: None,
             trace_store: None,
+            billing_store: None,
         }
     }
 
@@ -99,6 +103,12 @@ impl AppState {
     /// 注入链路追踪存储
     pub fn with_trace_store(mut self, store: Option<SharedTraceStore>) -> Self {
         self.trace_store = store;
+        self
+    }
+
+    /// 注入计费配置存储
+    pub fn with_billing_store(mut self, store: Option<SharedBillingStore>) -> Self {
+        self.billing_store = store;
         self
     }
 }

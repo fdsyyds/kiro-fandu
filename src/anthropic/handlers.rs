@@ -37,6 +37,24 @@ use super::types::{
 };
 use super::websearch;
 
+/// 应用缓存上报比例：按 ratio 缩减 cache_read，多出部分归入 input。
+/// cache_creation 不受影响（它是本轮新写入的缓存，不算"优惠"）。
+/// 返回 (adjusted_input, cache_creation, adjusted_cache_read)。
+pub fn apply_cache_report_ratio(
+    input: i32,
+    cache_creation: i32,
+    cache_read: i32,
+    ratio: f64,
+) -> (i32, i32, i32) {
+    if ratio >= 1.0 || cache_read <= 0 {
+        return (input, cache_creation, cache_read);
+    }
+    let ratio = ratio.clamp(0.0, 1.0);
+    let reported_read = (cache_read as f64 * ratio).round() as i32;
+    let moved_to_input = cache_read - reported_read;
+    (input + moved_to_input, cache_creation, reported_read)
+}
+
 /// 请求结束时记录用量的钩子
 ///
 /// 在 handler 入口构造，调用 [`Self::record`] 时把当次请求的 input/output token、
@@ -636,6 +654,11 @@ pub async fn post_messages(
         );
     }
     let hook = UsageRecordHook::from_state(&state, key_ctx.key_id, payload.model.clone());
+    let cache_report_ratio = state
+        .billing_store
+        .as_ref()
+        .map(|s| s.pricing().cache_report_ratio)
+        .unwrap_or(1.0);
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
         Some(p) => p.clone(),
@@ -789,6 +812,7 @@ pub async fn post_messages(
             cache_usage,
             tracer,
             key_ctx.group.clone(),
+            cache_report_ratio,
         )
         .await
     } else {
@@ -814,6 +838,7 @@ pub async fn post_messages(
             cache_usage,
             tracer,
             key_ctx.group.clone(),
+            cache_report_ratio,
         )
         .await
     }
@@ -832,6 +857,7 @@ async fn handle_stream_request(
     cache_usage: super::cache_metering::CacheUsage,
     tracer: std::sync::Arc<RequestTracer>,
     group: Option<String>,
+    cache_report_ratio: f64,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let call_result = match provider.call_api_stream(request_body, Some(tracer.as_ref()), group.as_deref()).await {
@@ -849,6 +875,7 @@ async fn handle_stream_request(
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map, known_tool_names);
     ctx.cache_usage = cache_usage;
+    ctx.cache_report_ratio = cache_report_ratio;
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -1051,6 +1078,7 @@ async fn handle_non_stream_request(
     cache_usage: super::cache_metering::CacheUsage,
     tracer: std::sync::Arc<RequestTracer>,
     group: Option<String>,
+    cache_report_ratio: f64,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let call_result = match provider.call_api(request_body, Some(tracer.as_ref()), group.as_deref()).await {
@@ -1242,6 +1270,10 @@ async fn handle_non_stream_request(
     let (final_input_tokens, cache_creation_tokens, cache_read_tokens) =
         cache_usage.split_against_total(total_input_tokens);
 
+    // 应用缓存上报比例（对客户端响应生效，内部 trace/hook 记录真实值）
+    let (report_input, report_creation, report_read) =
+        apply_cache_report_ratio(final_input_tokens, cache_creation_tokens, cache_read_tokens, cache_report_ratio);
+
     // 构建 Anthropic 响应
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
@@ -1252,10 +1284,10 @@ async fn handle_non_stream_request(
         "stop_reason": stop_reason,
         "stop_sequence": null,
         "usage": {
-            "input_tokens": final_input_tokens,
+            "input_tokens": report_input,
             "output_tokens": output_tokens,
-            "cache_creation_input_tokens": cache_creation_tokens,
-            "cache_read_input_tokens": cache_read_tokens
+            "cache_creation_input_tokens": report_creation,
+            "cache_read_input_tokens": report_read
         }
     });
 
@@ -1427,6 +1459,11 @@ pub async fn post_messages_cc(
         "Received POST /cc/v1/messages request"
     );
     let hook = UsageRecordHook::from_state(&state, key_ctx.key_id, payload.model.clone());
+    let cache_report_ratio = state
+        .billing_store
+        .as_ref()
+        .map(|s| s.pricing().cache_report_ratio)
+        .unwrap_or(1.0);
 
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
@@ -1579,6 +1616,7 @@ pub async fn post_messages_cc(
             cache_usage,
             tracer,
             key_ctx.group.clone(),
+            cache_report_ratio,
         )
         .await
     } else {
@@ -1604,6 +1642,7 @@ pub async fn post_messages_cc(
             cache_usage,
             tracer,
             key_ctx.group.clone(),
+            cache_report_ratio,
         )
         .await
     }
@@ -1625,6 +1664,7 @@ async fn handle_stream_request_buffered(
     cache_usage: super::cache_metering::CacheUsage,
     tracer: std::sync::Arc<RequestTracer>,
     group: Option<String>,
+    cache_report_ratio: f64,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let call_result = match provider.call_api_stream(request_body, Some(tracer.as_ref()), group.as_deref()).await {
@@ -1647,6 +1687,7 @@ async fn handle_stream_request_buffered(
         known_tool_names,
     );
     ctx.set_cache_usage(cache_usage);
+    ctx.set_cache_report_ratio(cache_report_ratio);
 
     // 创建缓冲 SSE 流
     let stream = create_buffered_sse_stream(response, ctx, hook, credential_id, tracer);

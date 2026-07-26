@@ -1395,6 +1395,8 @@ pub struct StreamContext {
     tool_json_error: Option<ToolJsonAccumulatorError>,
     /// 跨 chunk 过滤混入 assistant 文本的字面 `<tool_use>` XML 泄漏。
     tool_use_xml_filter: ToolUseXmlLeakFilter,
+    /// 缓存上报比例（0.0~1.0）：返回给客户端的 cache_read 按此比例缩减。
+    pub cache_report_ratio: f64,
 }
 
 impl StreamContext {
@@ -1450,6 +1452,7 @@ impl StreamContext {
             tool_json_accumulator: ToolJsonAccumulator::new(),
             tool_json_error: None,
             tool_use_xml_filter: ToolUseXmlLeakFilter::default(),
+            cache_report_ratio: 1.0,
         }
     }
 
@@ -2453,12 +2456,21 @@ impl StreamContext {
         // 互斥口径：total 真值（contextUsage 优先）− 缓存覆盖 = 未缓存的 input。
         let (final_input_tokens, cache_creation, cache_read) = self.resolved_usage();
 
+        // 应用缓存上报比例（客户端响应用调整后的值，内部 trace/hook 用真实值）
+        let (report_input, report_creation, report_read) =
+            super::handlers::apply_cache_report_ratio(
+                final_input_tokens,
+                cache_creation,
+                cache_read,
+                self.cache_report_ratio,
+            );
+
         // 生成最终事件（message_delta + message_stop）
         events.extend(self.state_manager.generate_final_events(
-            final_input_tokens,
+            report_input,
             self.output_tokens,
-            cache_creation,
-            cache_read,
+            report_creation,
+            report_read,
         ));
 
         // 工具调用 JSON 错误：在最终事件之后补一个 Anthropic `error` 事件，明确告知
@@ -2525,6 +2537,10 @@ impl BufferedStreamContext {
     /// 注入由 CacheMeter 计算的缓存覆盖情况（estimate 口径），最终上报时分摊。
     pub fn set_cache_usage(&mut self, cache_usage: super::cache_metering::CacheUsage) {
         self.inner.cache_usage = cache_usage;
+    }
+
+    pub fn set_cache_report_ratio(&mut self, ratio: f64) {
+        self.inner.cache_report_ratio = ratio;
     }
 
     /// 处理 Kiro 事件并缓冲结果

@@ -33,9 +33,17 @@ pub struct Pricing {
     pub cache_multiplier: f64,
     /// 无缓存收入倍率
     pub no_cache_multiplier: f64,
+    /// 缓存上报比例（0.0~1.0）：返回给客户端的 cache_read 按此比例缩减，
+    /// 多出来的部分归入 input_tokens。1.0=原样上报，0.0=全部报为 input。
+    #[serde(default = "default_cache_report_ratio")]
+    pub cache_report_ratio: f64,
     /// 按模型名索引的售价
     #[serde(default)]
     pub models: HashMap<String, ModelPrice>,
+}
+
+fn default_cache_report_ratio() -> f64 {
+    1.0
 }
 
 impl Default for Pricing {
@@ -43,6 +51,7 @@ impl Default for Pricing {
         Self {
             cache_multiplier: 0.1,
             no_cache_multiplier: 0.12,
+            cache_report_ratio: 1.0,
             models: HashMap::new(),
         }
     }

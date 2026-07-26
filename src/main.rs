@@ -273,6 +273,7 @@ async fn main() {
         Some(usage_aggregator.clone()),
         Some(cache_meter.clone()),
         trace_store.clone(),
+        Some(billing_store.clone()),
     );
 
     // 构建 Admin API 路由（配置了非空 adminApiKey 时启用）

@@ -279,18 +279,35 @@ pub struct StatsQueryWindow {
 impl StatsQueryWindow {
     pub fn preset(range: Range, granularity: StatsGranularity) -> Self {
         let now = Utc::now().timestamp();
-        let start_ts = match range {
+        let raw_start = match range {
             Range::Last1h => now - 3600,
             Range::Last24h => now - 24 * 3600,
             Range::Last7d => now - 7 * 24 * 3600,
             Range::Last30d => now - 30 * 24 * 3600,
         };
+        // 向下对齐到桶边界（本地整点/整天），避免跨界桶被漏掉
+        let start_ts = floor_to_bucket_boundary(raw_start, granularity);
         Self {
             start_ts,
             end_ts: now,
             granularity,
         }
     }
+}
+
+/// 将时间戳向下对齐到本地小时/天的起始，与 ingest 入桶逻辑一致
+fn floor_to_bucket_boundary(ts: i64, granularity: StatsGranularity) -> i64 {
+    let dt = DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or_default();
+    let local = dt.with_timezone(&Local);
+    let floored = match granularity {
+        StatsGranularity::Hour => Local
+            .with_ymd_and_hms(local.year(), local.month(), local.day(), local.hour(), 0, 0)
+            .single(),
+        StatsGranularity::Day => Local
+            .with_ymd_and_hms(local.year(), local.month(), local.day(), 0, 0, 0)
+            .single(),
+    };
+    floored.map(|d| d.timestamp()).unwrap_or(ts)
 }
 
 /// 时序点（导出给前端）
