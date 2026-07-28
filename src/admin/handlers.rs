@@ -145,12 +145,18 @@ pub async fn get_credential_balance(
 
 /// GET /api/admin/credentials/:id/models
 /// 获取指定凭据当前可用的模型列表（按需实时查询上游）
+/// 查询成功后自动将模型 id 追加到 billing.json 的 knownModels（去重持久化）
 pub async fn get_credential_models(
     State(state): State<AdminState>,
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
     match state.service.get_available_models(id).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => {
+            // 持久化新发现的模型到 known_models
+            let model_ids: Vec<String> = response.models.iter().map(|m| m.model_id.clone()).collect();
+            state.billing.merge_known_models(&model_ids);
+            Json(response).into_response()
+        }
         Err(e) => e.into_http_response(),
     }
 }
@@ -1345,6 +1351,12 @@ pub async fn set_account_price(
 /// 读取历史归档（已删除号的一生盈亏，按归档时间倒序）
 pub async fn get_billing_history(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.billing.history())
+}
+
+/// GET /api/admin/billing/known-models
+/// 读取已知模型列表（点击「查看可用模型」时自动积累，用于定价编辑器）
+pub async fn get_known_models(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.billing.known_models())
 }
 
 /// GET /api/admin/traces

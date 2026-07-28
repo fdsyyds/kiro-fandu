@@ -64,3 +64,8 @@ export async function getHistory(): Promise<ArchivedAccount[]> {
   const { data } = await api.get<ArchivedAccount[]>('/billing/history')
   return data
 }
+
+export async function getKnownModels(): Promise<string[]> {
+  const { data } = await api.get<string[]>('/billing/known-models')
+  return data
+}

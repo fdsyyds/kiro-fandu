@@ -12,6 +12,7 @@ import {
   useBillingByModel,
   useBillingCredentials,
   useBillingHistory,
+  useKnownModels,
   usePricing,
   useSavePricing,
   useSetAccountPrice,
@@ -180,6 +181,7 @@ export function BillingPage() {
   const pricesQ = useAccountPrices()
   const pricingQ = usePricing()
   const historyQ = useBillingHistory()
+  const knownModelsQ = useKnownModels()
   const savePricing = useSavePricing()
   const setAccountPrice = useSetAccountPrice()
 
@@ -329,7 +331,7 @@ export function BillingPage() {
           <HistoryPool history={history} onPriceChange={setPrice} />
           <PricingEditor
             pricing={pricing}
-            models={usage.map((u) => u.model)}
+            models={[...new Set([...(knownModelsQ.data ?? []), ...usage.map((u) => u.model)])].sort()}
             onChange={setPricingDraft}
             onSave={onSavePricing}
             saving={savePricing.isPending}

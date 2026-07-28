@@ -2,6 +2,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import {
   getAccountPrices,
   getHistory,
+  getKnownModels,
   getPricing,
   savePricing,
   setAccountPrice,
@@ -94,5 +95,13 @@ export function useSavePricing() {
   return useMutation({
     mutationFn: (pricing: Pricing) => savePricing(pricing),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['billing', 'pricing'] }),
+  })
+}
+
+export function useKnownModels() {
+  return useQuery({
+    queryKey: ['billing', 'known-models'],
+    queryFn: getKnownModels,
+    staleTime: 60_000,
   })
 }

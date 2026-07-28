@@ -88,6 +88,9 @@ struct BillingData {
     account_prices: HashMap<u64, f64>,
     #[serde(default)]
     history: Vec<ArchivedAccount>,
+    /// 已知模型 id 集合（点击「查看可用模型」时自动追加，用于定价编辑器）
+    #[serde(default)]
+    known_models: Vec<String>,
 }
 
 /// 计费存储（线程安全 + 自动持久化）
@@ -165,6 +168,27 @@ impl BillingStore {
         let mut inner = self.inner.write();
         inner.account_prices.insert(id, price);
         self.save_locked(&inner);
+    }
+
+    /// 读取已知模型列表（去重后的全集）
+    pub fn known_models(&self) -> Vec<String> {
+        self.inner.read().known_models.clone()
+    }
+
+    /// 追加新发现的模型 id（去重），有新增时才写盘
+    pub fn merge_known_models(&self, models: &[String]) {
+        let mut inner = self.inner.write();
+        let mut changed = false;
+        for m in models {
+            if !inner.known_models.contains(m) {
+                inner.known_models.push(m.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            inner.known_models.sort();
+            self.save_locked(&inner);
+        }
     }
 
     /// 读取历史归档（按归档时间倒序）
