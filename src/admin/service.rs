@@ -1855,6 +1855,7 @@ impl AdminService {
             rate_limit_backoff_base_secs: self
                 .token_manager
                 .get_rate_limit_backoff_base_secs(),
+            max_total_retries: self.token_manager.get_max_total_retries(),
         }
     }
 
@@ -1866,9 +1867,10 @@ impl AdminService {
         if req.failover.is_none()
             && req.cooldown_secs.is_none()
             && req.rate_limit_backoff_base_secs.is_none()
+            && req.max_total_retries.is_none()
         {
             return Err(AdminServiceError::InvalidCredential(
-                "至少提供 failover / cooldownSecs / rateLimitBackoffBaseSecs 一个字段".to_string(),
+                "至少提供 failover / cooldownSecs / rateLimitBackoffBaseSecs / maxTotalRetries 一个字段".to_string(),
             ));
         }
 
@@ -1881,6 +1883,12 @@ impl AdminService {
         if let Some(base_secs) = req.rate_limit_backoff_base_secs {
             self.token_manager
                 .set_rate_limit_backoff_base_secs(base_secs)
+                .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
+        }
+
+        if let Some(max_retries) = req.max_total_retries {
+            self.token_manager
+                .set_max_total_retries(max_retries)
                 .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
         }
 

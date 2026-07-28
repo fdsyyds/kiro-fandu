@@ -31,6 +31,8 @@ export interface CredentialStatusItem {
   disabledReason?: string
   /** 账号级风控冷却剩余秒数（>0 表示冷却中） */
   throttledRemainingSecs?: number
+  /** 当前冷却是否由普通 429 限流触发（true = 普通限流，false = 账号级风控） */
+  isRateLimited?: boolean
   endpoint: string
   /** 账号所属分组（可属于多个分组） */
   groups?: string[]

@@ -978,6 +978,9 @@ pub struct CredentialEntrySnapshot {
     /// 临时冷却剩余秒数（账号级 429 风控）；冷却中且 `> 0` 才返回
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throttled_remaining_secs: Option<u64>,
+    /// 当前冷却是否由普通 429 限流触发（true = 普通限流，false = 账号级风控）
+    #[serde(default)]
+    pub is_rate_limited: bool,
     /// 端点名称（未显式配置时返回 None，由 Admin 层回退到默认值）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
@@ -1036,6 +1039,9 @@ pub struct MultiTokenManager {
     /// 普通 429 指数退避基础冷却时长 `x`（秒，运行时可修改）。
     /// 冷却序列 x → 2x → 4x（封顶 4x），与账号级风控分离。
     rate_limit_backoff_base_secs: AtomicU64,
+    /// 单次请求最大总重试次数硬上限（运行时可修改，默认 12）。
+    /// 实际重试次数 = min(当前分组可用凭据数, 此值)。
+    max_total_retries: AtomicUsize,
     /// tiered 模式的全局轮询指针（层内 round-robin，fetch_add 取模）。
     /// 未使用分组功能，单个全局计数器即可保证层内均匀分发。
     rr_counter: AtomicUsize,
@@ -1202,6 +1208,7 @@ impl MultiTokenManager {
         let throttle_failover = config.account_throttle_failover;
         let throttle_cooldown_secs = config.account_throttle_cooldown_secs;
         let rate_limit_backoff_base_secs = config.rate_limit_backoff_base_secs;
+        let max_total_retries = config.max_total_retries;
         let manager = Self {
             config,
             proxy: Mutex::new(proxy),
@@ -1216,6 +1223,7 @@ impl MultiTokenManager {
             account_throttle_failover: AtomicBool::new(throttle_failover),
             account_throttle_cooldown_secs: AtomicU64::new(throttle_cooldown_secs),
             rate_limit_backoff_base_secs: AtomicU64::new(rate_limit_backoff_base_secs),
+            max_total_retries: AtomicUsize::new(max_total_retries),
             rr_counter: AtomicUsize::new(0),
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
@@ -2285,6 +2293,7 @@ impl MultiTokenManager {
                         .and_then(|t| t.checked_duration_since(now))
                         .map(|d| d.as_secs())
                         .filter(|s| *s > 0),
+                    is_rate_limited: e.rl429_count > 0,
                     endpoint: e.credentials.endpoint.clone(),
                     groups: e.credentials.groups.clone(),
                     source_channel: e.credentials.source_channel.clone(),
@@ -2376,9 +2385,9 @@ impl MultiTokenManager {
     /// - 冷却秒数 = `base_secs * 2^min(count-1, RL429_BACKOFF_MAX_SHIFT)`，即 x → 2x → 4x，封顶 4x。
     /// - 成功一次由 [`report_success`] 清零计数。
     ///
-    /// `base_secs` 为 0 时按 1 处理（避免冷却为 0 导致空转）。返回本请求范围内
-    /// （匹配 model/group、未禁用、未在冷却）的剩余可用凭据数，供调用方决定
-    /// 是继续换号重试还是返回限流错误。
+    /// `base_secs` 为 0 时不设置冷却时间（直接换号，不给当前号加冷却）。
+    /// 返回本请求范围内（匹配 model/group、未禁用、未在冷却）的剩余可用凭据数，
+    /// 供调用方决定是继续换号重试还是返回限流错误。
     pub fn report_rate_limited_for_request(
         &self,
         id: u64,
@@ -2387,7 +2396,6 @@ impl MultiTokenManager {
         group: Option<&str>,
     ) -> usize {
         let now = Instant::now();
-        let base = base_secs.max(1);
         {
             let mut entries = self.entries.lock();
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -2403,22 +2411,31 @@ impl MultiTokenManager {
                 };
                 entry.rl429_last = Some(now);
 
-                let shift = (entry.rl429_count.saturating_sub(1)).min(RL429_BACKOFF_MAX_SHIFT);
-                let cooldown_secs = base.saturating_mul(1u64 << shift);
-                let until = now + StdDuration::from_secs(cooldown_secs);
-                // 取较晚到期（与账号级风控 / 已有冷却共存时不缩短）。
-                entry.throttled_until = Some(match entry.throttled_until {
-                    Some(prev) if prev > until => prev,
-                    _ => until,
-                });
+                // base_secs == 0 时不设冷却，直接换号
+                if base_secs > 0 {
+                    let shift = (entry.rl429_count.saturating_sub(1)).min(RL429_BACKOFF_MAX_SHIFT);
+                    let cooldown_secs = base_secs.saturating_mul(1u64 << shift);
+                    let until = now + StdDuration::from_secs(cooldown_secs);
+                    // 取较晚到期（与账号级风控 / 已有冷却共存时不缩短）。
+                    entry.throttled_until = Some(match entry.throttled_until {
+                        Some(prev) if prev > until => prev,
+                        _ => until,
+                    });
+                    tracing::warn!(
+                        "凭据 #{} 普通 429 限流（第 {} 次，冷却 {} 秒）",
+                        id,
+                        entry.rl429_count,
+                        cooldown_secs
+                    );
+                } else {
+                    tracing::warn!(
+                        "凭据 #{} 普通 429 限流（第 {} 次，退避基数 0 不冷却直接换号）",
+                        id,
+                        entry.rl429_count,
+                    );
+                }
                 // 普通 429 计入累计失败用于展示，但不动连续 failure_count（不触发永久禁用）。
                 entry.total_failure_count += 1;
-                tracing::warn!(
-                    "凭据 #{} 普通 429 限流（第 {} 次，冷却 {} 秒）",
-                    id,
-                    entry.rl429_count,
-                    cooldown_secs
-                );
             }
 
             let throttled_now = Instant::now();
@@ -3537,10 +3554,11 @@ impl MultiTokenManager {
 
     /// 设置普通 429 指数退避基础冷却秒数 `x`（Admin API），并持久化。
     ///
-    /// 冷却序列 x → 2x → 4x（封顶 4x）。限定 1..=3600 秒。持久化失败会回滚内存值。
+    /// 冷却序列 x → 2x → 4x（封顶 4x）。限定 0..=3600 秒。0 表示不冷却直接换号。
+    /// 持久化失败会回滚内存值。
     pub fn set_rate_limit_backoff_base_secs(&self, base_secs: u64) -> anyhow::Result<()> {
-        if !(1..=3600).contains(&base_secs) {
-            anyhow::bail!("基础冷却时长必须在 1..=3600 秒内: {}", base_secs);
+        if base_secs > 3600 {
+            anyhow::bail!("基础冷却时长必须在 0..=3600 秒内: {}", base_secs);
         }
 
         let prev = self.get_rate_limit_backoff_base_secs();
@@ -3578,6 +3596,54 @@ impl MultiTokenManager {
         config
             .save()
             .with_context(|| format!("持久化普通 429 退避配置失败: {}", config_path.display()))?;
+
+        Ok(())
+    }
+
+    /// 获取最大总重试次数（Admin API）
+    pub fn get_max_total_retries(&self) -> usize {
+        self.max_total_retries.load(Ordering::Relaxed)
+    }
+
+    /// 设置最大总重试次数（Admin API），并持久化。限定 1..=50。
+    pub fn set_max_total_retries(&self, value: usize) -> anyhow::Result<()> {
+        if !(1..=50).contains(&value) {
+            anyhow::bail!("最大重试次数必须在 1..=50 内: {}", value);
+        }
+
+        let prev = self.get_max_total_retries();
+        if prev == value {
+            return Ok(());
+        }
+
+        self.max_total_retries.store(value, Ordering::Relaxed);
+
+        if let Err(err) = self.persist_max_total_retries(value) {
+            self.max_total_retries.store(prev, Ordering::Relaxed);
+            return Err(err);
+        }
+
+        tracing::info!("最大总重试次数已设置为: {}", value);
+        Ok(())
+    }
+
+    fn persist_max_total_retries(&self, value: usize) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        let config_path = match self.config.config_path() {
+            Some(path) => path.to_path_buf(),
+            None => {
+                tracing::warn!("配置文件路径未知，最大重试次数配置仅在当前进程生效");
+                return Ok(());
+            }
+        };
+
+        let mut config = Config::load(&config_path)
+            .with_context(|| format!("重新加载配置失败: {}", config_path.display()))?;
+        config.max_total_retries = value;
+        config
+            .save()
+            .with_context(|| format!("持久化最大重试次数配置失败: {}", config_path.display()))?;
 
         Ok(())
     }

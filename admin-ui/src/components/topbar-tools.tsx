@@ -130,6 +130,12 @@ export function TopbarTools({ compact = false }: TopbarToolsProps) {
           toast.success(`普通 429 基础冷却已设为 ${secs} 秒（序列 ${secs} → ${secs * 2} → ${secs * 4}s）`),
         onError: (err) => toast.error(`保存失败: ${extractErrorMessage(err)}`),
       }),
+    updateMaxRetries: (value: number) =>
+      setThrottleConfig({ maxTotalRetries: value }, {
+        onSuccess: () =>
+          toast.success(`最大重试次数已设为 ${value}`),
+        onError: (err) => toast.error(`保存失败: ${extractErrorMessage(err)}`),
+      }),
   }
 
   return (
@@ -242,10 +248,11 @@ interface ToolControls {
   loadBalancingMode?: LoadBalancingMode
   openImageUpdate: () => void
   openKeyDialog: () => void
-  throttleConfig?: { failover: boolean; cooldownSecs: number; rateLimitBackoffBaseSecs: number }
+  throttleConfig?: { failover: boolean; cooldownSecs: number; rateLimitBackoffBaseSecs: number; maxTotalRetries: number }
   updateBackoffBase: (secs: number) => void
   updateCheck?: { hasUpdate: boolean; latestVersion: string; currentVersion: string }
   updateCooldown: (secs: number) => void
+  updateMaxRetries: (value: number) => void
 }
 
 function FullTools({ controls }: { controls: ToolControls }) {
@@ -259,6 +266,7 @@ function FullTools({ controls }: { controls: ToolControls }) {
         onToggleFailover={controls.handleToggleFailover}
         onChangeCooldown={controls.updateCooldown}
         onChangeBackoffBase={controls.updateBackoffBase}
+        onChangeMaxRetries={controls.updateMaxRetries}
       />
       <RefreshButton onRefresh={controls.handleRefresh} />
       <ImageUpdateButton controls={controls} />
@@ -275,6 +283,7 @@ function CompactTools({ controls }: { controls: ToolControls }) {
     onToggleFailover: controls.handleToggleFailover,
     onChangeCooldown: controls.updateCooldown,
     onChangeBackoffBase: controls.updateBackoffBase,
+    onChangeMaxRetries: controls.updateMaxRetries,
   }
 
   return (
@@ -391,12 +400,13 @@ function UpdateDot() {
 }
 
 interface ThrottleConfigButtonProps {
-  config?: { failover: boolean; cooldownSecs: number; rateLimitBackoffBaseSecs: number }
+  config?: { failover: boolean; cooldownSecs: number; rateLimitBackoffBaseSecs: number; maxTotalRetries: number }
   loading: boolean
   saving: boolean
   onToggleFailover: () => void
   onChangeCooldown: (secs: number) => void
   onChangeBackoffBase: (secs: number) => void
+  onChangeMaxRetries: (value: number) => void
 }
 
 interface ThrottleState {
@@ -404,6 +414,7 @@ interface ThrottleState {
   cooldownSecs: number
   failover: boolean
   backoffBaseSecs: number
+  maxTotalRetries: number
 }
 
 interface CustomCooldownFormProps {
@@ -435,9 +446,15 @@ const MAX_CUSTOM_COOLDOWN_MINUTES = 1440
 
 // 普通 429 指数退避基础冷却 x（秒）：序列 x → 2x → 4x（封顶 4x）。
 const DEFAULT_BACKOFF_BASE_SECS = 1
-const MIN_BACKOFF_BASE_SECS = 1
+const MIN_BACKOFF_BASE_SECS = 0
 const MAX_BACKOFF_BASE_SECS = 3600
-const BACKOFF_BASE_PRESETS = [1, 2, 5, 10, 30]
+const BACKOFF_BASE_PRESETS = [0, 1, 2, 5, 10, 30]
+
+// 最大总重试次数
+const DEFAULT_MAX_TOTAL_RETRIES = 12
+const MIN_MAX_TOTAL_RETRIES = 1
+const MAX_MAX_TOTAL_RETRIES = 50
+const MAX_RETRIES_PRESETS = [4, 8, 12, 20, 50]
 
 /**
  * 故障转移开关 + 冷却时长设置（紧凑下拉）
@@ -447,7 +464,7 @@ const BACKOFF_BASE_PRESETS = [1, 2, 5, 10, 30]
  * - 5 个预设时长 + 一个自定义输入（分钟）
  */
 function ThrottleConfigButton({
-  config, loading, saving, onToggleFailover, onChangeCooldown, onChangeBackoffBase,
+  config, loading, saving, onToggleFailover, onChangeCooldown, onChangeBackoffBase, onChangeMaxRetries,
 }: ThrottleConfigButtonProps) {
   const [open, setOpen] = useState(false)
   const [customMin, setCustomMin] = useState('')
@@ -492,6 +509,11 @@ function ThrottleConfigButton({
           saving={saving}
           state={state}
           onChangeBackoffBase={onChangeBackoffBase}
+        />
+        <MaxRetriesPanel
+          saving={saving}
+          state={state}
+          onChangeMaxRetries={onChangeMaxRetries}
         />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -657,7 +679,7 @@ function BackoffBasePanel({
       <DropdownMenuLabel className="pt-1">普通 429 退避基数 x</DropdownMenuLabel>
       <div className="px-2 pb-2">
         <div className="mb-1.5 text-xs text-muted-foreground leading-snug">
-          限流时短时冷却并换号，冷却序列 {cur} → {cur * 2} → {cur * 4}s（封顶 4x）
+          限流时短时冷却并换号{cur > 0 ? `，冷却序列 ${cur} → ${cur * 2} → ${cur * 4}s（封顶 4x）` : '，不冷却直接换号'}
         </div>
         <div className="grid grid-cols-5 gap-1">
           {BACKOFF_BASE_PRESETS.map((secs) => (
@@ -703,8 +725,85 @@ function BackoffBasePanel({
   )
 }
 
+/**
+ * 最大总重试次数设置面板。
+ *
+ * 实际重试次数 = min(当前分组可用凭据数, 此值)。
+ */
+function MaxRetriesPanel({
+  saving, state, onChangeMaxRetries,
+}: {
+  saving: boolean
+  state: ThrottleState
+  onChangeMaxRetries: (value: number) => void
+}) {
+  const [customVal, setCustomVal] = useState('')
+  const cur = state.maxTotalRetries
+
+  const submitCustom = (e: React.FormEvent) => {
+    e.preventDefault()
+    const v = parseInt(customVal, 10)
+    if (Number.isNaN(v) || v < MIN_MAX_TOTAL_RETRIES || v > MAX_MAX_TOTAL_RETRIES) {
+      toast.error(`请输入 ${MIN_MAX_TOTAL_RETRIES}-${MAX_MAX_TOTAL_RETRIES} 之间的数值`)
+      return
+    }
+    onChangeMaxRetries(v)
+    setCustomVal('')
+  }
+
+  return (
+    <>
+      <DropdownMenuLabel className="pt-1">最大重试次数</DropdownMenuLabel>
+      <div className="px-2 pb-2">
+        <div className="mb-1.5 text-xs text-muted-foreground leading-snug">
+          429 换号重试上限 = min(可用号数, {cur})
+        </div>
+        <div className="grid grid-cols-5 gap-1">
+          {MAX_RETRIES_PRESETS.map((v) => (
+            <Button
+              key={v}
+              type="button"
+              size="sm"
+              variant={v === cur ? 'default' : 'outline'}
+              className="h-7 text-xs"
+              disabled={saving}
+              onClick={() => {
+                if (v !== cur) onChangeMaxRetries(v)
+              }}
+            >
+              {v}
+            </Button>
+          ))}
+        </div>
+        <form onSubmit={submitCustom} className="mt-2 flex items-center gap-1.5">
+          <Input
+            type="number"
+            min={MIN_MAX_TOTAL_RETRIES}
+            max={MAX_MAX_TOTAL_RETRIES}
+            placeholder={`自定义（当前 ${cur}）`}
+            value={customVal}
+            onChange={(e) => setCustomVal(e.target.value)}
+            disabled={saving}
+            className="h-7 text-xs"
+          />
+          <span className="text-xs text-muted-foreground">次</span>
+          <Button
+            type="submit"
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            disabled={saving || !customVal.trim()}
+          >
+            保存
+          </Button>
+        </form>
+      </div>
+    </>
+  )
+}
+
 function ThrottleCompactItems(props: ThrottleConfigButtonProps) {
-  const { loading, saving, onToggleFailover, onChangeCooldown, onChangeBackoffBase } = props
+  const { loading, saving, onToggleFailover, onChangeCooldown, onChangeBackoffBase, onChangeMaxRetries } = props
   const [customMin, setCustomMin] = useState('')
   const state = readThrottleState(props.config)
   const busy = loading || saving
@@ -742,6 +841,11 @@ function ThrottleCompactItems(props: ThrottleConfigButtonProps) {
         saving={busy}
         state={state}
         onChangeBackoffBase={onChangeBackoffBase}
+      />
+      <MaxRetriesPanel
+        saving={busy}
+        state={state}
+        onChangeMaxRetries={onChangeMaxRetries}
       />
     </>
   )
@@ -812,6 +916,7 @@ function readThrottleState(
     cooldownSecs,
     failover: config?.failover ?? true,
     backoffBaseSecs: config?.rateLimitBackoffBaseSecs ?? DEFAULT_BACKOFF_BASE_SECS,
+    maxTotalRetries: config?.maxTotalRetries ?? DEFAULT_MAX_TOTAL_RETRIES,
   }
 }
 

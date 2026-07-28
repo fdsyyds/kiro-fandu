@@ -150,6 +150,30 @@ function formatCharge(v: number | null): string {
   return v.toFixed(4)
 }
 
+/** 计算单次盈亏：收入 - 成本；盈亏率 = 盈亏 / 成本 × 100% */
+function computeProfit(rec: TraceRecord, pricing: Pricing | undefined): { profit: number; rate: number } | null {
+  const charge = computeUserCharge(rec, pricing)
+  const cost = rec.credits ?? 0
+  if (charge == null || cost <= 0) return null
+  const profit = charge - cost
+  const rate = (profit / cost) * 100
+  return { profit, rate }
+}
+
+function formatProfit(v: { profit: number; rate: number } | null) {
+  if (v == null) return <span className="text-muted-foreground">—</span>
+  const positive = v.profit >= 0
+  const color = positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+  const sign = positive ? '+' : ''
+  const profitStr = Math.abs(v.profit) < 0.0001 ? '<0.0001' : v.profit.toFixed(4)
+  return (
+    <span className={color}>
+      <span>{sign}{profitStr}</span>
+      <span className="ml-1 text-[11px] opacity-75">({v.rate >= 0 ? '+' : ''}{v.rate.toFixed(0)}%)</span>
+    </span>
+  )
+}
+
 function credLabel(id: number, email?: string | null): string {
   if (id === 0) return '—'
   return email ? email : `#${id}`
@@ -268,6 +292,7 @@ function TraceRow({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | undef
   const [open, setOpen] = useState(false)
   const errStyle = rec.errorType ? outcomeStyle(rec.errorType) : null
   const charge = computeUserCharge(rec, pricing)
+  const profit = computeProfit(rec, pricing)
   return (
     <>
       <tr
@@ -303,6 +328,9 @@ function TraceRow({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | undef
         </td>
         <td className="py-2.5 pr-3 text-[13px] tabular-nums">
           {formatCharge(charge)}
+        </td>
+        <td className="py-2.5 pr-3 text-[13px] tabular-nums">
+          {formatProfit(profit)}
         </td>
         <td className="py-2.5 pr-3 text-[13px] tabular-nums text-muted-foreground">
           {rec.firstTokenMs != null ? formatDuration(rec.firstTokenMs) : '—'}
@@ -615,6 +643,7 @@ export function TraceLogPage() {
                     <th className="py-2 pr-3 font-medium">Token</th>
                     <th className="py-2 pr-3 font-medium">费用</th>
                     <th className="py-2 pr-3 font-medium">用户扣费</th>
+                    <th className="py-2 pr-3 font-medium">盈亏</th>
                     <th className="py-2 pr-3 font-medium">首Token</th>
                     <th className="py-2 pr-3 font-medium">错误类型</th>
                     <th className="py-2 pr-3 font-medium">重试</th>

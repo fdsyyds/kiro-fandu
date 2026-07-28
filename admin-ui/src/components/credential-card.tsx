@@ -366,6 +366,8 @@ export function CredentialCard({
     credential.disabled && credential.disabledReason === "QuotaExceeded";
   const reasonStyle = getDisabledReasonStyle(credential.disabledReason);
   const isThrottled = !credential.disabled && throttleRemaining > 0;
+  const isRateLimitCooldown = isThrottled && credential.isRateLimited;
+  const isAccountThrottle = isThrottled && !credential.isRateLimited;
 
   // 卡片与列表行共用的状态描边 / 灰化（活跃 · 超额 · 冷却 · 禁用）
   const stateClasses = [
@@ -403,14 +405,24 @@ export function CredentialCard({
       {!credential.disabled && isQuotaExceeded && (
         <Badge variant="warning">已超额</Badge>
       )}
-      {isThrottled && (
+      {isAccountThrottle && (
         <Badge
           variant="warning"
           className="bg-orange-500/15 text-orange-700 dark:text-orange-300 border-orange-500/30"
           title="账号级风控冷却中（429 + suspicious activity），到期或手动解除后恢复调度"
         >
           <Clock className="mr-1 h-3 w-3" />
-          冷却 {formatThrottleCountdown(throttleRemaining)}
+          风控 {formatThrottleCountdown(throttleRemaining)}
+        </Badge>
+      )}
+      {isRateLimitCooldown && (
+        <Badge
+          variant="warning"
+          className="bg-yellow-500/15 text-yellow-700 dark:text-yellow-300 border-yellow-500/30"
+          title="普通 429 限流冷却中，到期或手动解除后恢复调度"
+        >
+          <Clock className="mr-1 h-3 w-3" />
+          429 冷却 {formatThrottleCountdown(throttleRemaining)}
         </Badge>
       )}
       {credential.authMethod && <Badge variant="secondary">{authLabel}</Badge>}
@@ -486,7 +498,7 @@ export function CredentialCard({
             disabled={clearThrottle.isPending}
           >
             <Clock />
-            解除风控冷却（{formatThrottleCountdown(throttleRemaining)}）
+            解除冷却（{formatThrottleCountdown(throttleRemaining)}）
           </DropdownMenuItem>
         )}
         {balance?.overageCapable === true &&

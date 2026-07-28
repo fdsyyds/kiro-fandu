@@ -441,6 +441,8 @@ pub struct AccountThrottleConfigResponse {
     pub cooldown_secs: u64,
     /// 普通 429 指数退避基础冷却时长 `x`（秒），序列 x → 2x → 4x（封顶 4x）
     pub rate_limit_backoff_base_secs: u64,
+    /// 单次请求最大总重试次数
+    pub max_total_retries: usize,
 }
 
 /// 更新账号级风控故障转移配置
@@ -453,9 +455,12 @@ pub struct SetAccountThrottleConfigRequest {
     /// 账号级风控冷却时长（秒）；缺省表示不修改，1..=86400
     #[serde(default)]
     pub cooldown_secs: Option<u64>,
-    /// 普通 429 退避基础冷却 `x`（秒）；缺省表示不修改，1..=3600
+    /// 普通 429 退避基础冷却 `x`（秒）；缺省表示不修改，0..=3600
     #[serde(default)]
     pub rate_limit_backoff_base_secs: Option<u64>,
+    /// 最大总重试次数；缺省表示不修改，1..=50
+    #[serde(default)]
+    pub max_total_retries: Option<usize>,
 }
 
 /// 日志治理配置响应

@@ -150,6 +150,13 @@ pub struct Config {
     #[serde(default = "default_rate_limit_backoff_base_secs")]
     pub rate_limit_backoff_base_secs: u64,
 
+    /// 单次请求的最大总重试次数硬上限（默认 12）。
+    ///
+    /// 实际重试次数 = min(当前分组可用凭据数, 此值)。
+    /// 普通 429 换号重试时每次都换到不同的未冷却号，提高上限可充分利用多号池。
+    #[serde(default = "default_max_total_retries")]
+    pub max_total_retries: usize,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -241,6 +248,10 @@ fn default_rate_limit_backoff_base_secs() -> u64 {
     1
 }
 
+fn default_max_total_retries() -> usize {
+    12
+}
+
 fn default_update_auto_apply_time() -> String {
     "03:00".to_string()
 }
@@ -298,6 +309,7 @@ impl Default for Config {
             load_balancing_mode: default_load_balancing_mode(),
             account_throttle_failover: default_account_throttle_failover(),
             rate_limit_backoff_base_secs: default_rate_limit_backoff_base_secs(),
+            max_total_retries: default_max_total_retries(),
             account_throttle_cooldown_secs: default_account_throttle_cooldown_secs(),
             extract_thinking: default_extract_thinking(),
             tool_compatibility_mode: default_tool_compatibility_mode(),

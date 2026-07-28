@@ -420,6 +420,8 @@ export interface AccountThrottleConfig {
   cooldownSecs: number
   // 普通 429 指数退避基础冷却 x（秒），序列 x → 2x → 4x（封顶 4x）
   rateLimitBackoffBaseSecs: number
+  // 单次请求最大总重试次数
+  maxTotalRetries: number
 }
 
 // 获取账号级风控故障转移配置
