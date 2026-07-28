@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { toast } from 'sonner'
 import {
   ScrollText,
@@ -38,7 +38,7 @@ import {
 import { useTraces } from '@/hooks/use-traces'
 import { useClientKeys } from '@/hooks/use-client-keys'
 import { useGroupOptions } from '@/hooks/use-groups'
-import { usePricing } from '@/hooks/use-billing'
+import { usePricing, useAccountPrices, useBillingCredentials } from '@/hooks/use-billing'
 import type { Pricing } from '@/api/billing'
 import {
   useLogGovernanceConfig,
@@ -150,11 +150,37 @@ function formatCharge(v: number | null): string {
   return v.toFixed(4)
 }
 
+/** 构建凭据 id → 单价（号价/总额度）的映射 */
+function buildUnitCostMap(
+  prices: Record<string, number> | undefined,
+  credentials: Array<{ id: number; balance?: { usageLimit: number } | null }> | undefined,
+): Map<number, number> {
+  const map = new Map<number, number>()
+  if (!prices || !credentials) return map
+  for (const c of credentials) {
+    const price = prices[String(c.id)] ?? 0
+    const limit = c.balance?.usageLimit ?? 0
+    if (limit > 0) {
+      map.set(c.id, price / limit)
+    }
+  }
+  return map
+}
+
 /** 计算单次盈亏：收入 - 成本；盈亏率 = 盈亏 / 成本 × 100% */
-function computeProfit(rec: TraceRecord, pricing: Pricing | undefined): { profit: number; rate: number } | null {
+function computeProfit(
+  rec: TraceRecord,
+  pricing: Pricing | undefined,
+  unitCostMap: Map<number, number>,
+): { profit: number; rate: number } | null {
   const charge = computeUserCharge(rec, pricing)
-  const cost = rec.credits ?? 0
-  if (charge == null || cost <= 0) return null
+  if (charge == null) return null
+  const credits = rec.credits ?? 0
+  if (credits <= 0) return null
+  const unitCost = unitCostMap.get(rec.finalCredentialId)
+  if (unitCost == null || unitCost <= 0) return null
+  const cost = credits * unitCost
+  if (cost <= 0) return null
   const profit = charge - cost
   const rate = (profit / cost) * 100
   return { profit, rate }
@@ -288,11 +314,11 @@ function TokenCell({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | unde
   )
 }
 
-function TraceRow({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | undefined }) {
+function TraceRow({ rec, pricing, unitCostMap }: { rec: TraceRecord; pricing: Pricing | undefined; unitCostMap: Map<number, number> }) {
   const [open, setOpen] = useState(false)
   const errStyle = rec.errorType ? outcomeStyle(rec.errorType) : null
   const charge = computeUserCharge(rec, pricing)
-  const profit = computeProfit(rec, pricing)
+  const profit = computeProfit(rec, pricing, unitCostMap)
   return (
     <>
       <tr
@@ -554,6 +580,12 @@ export function TraceLogPage() {
 
   const { data: keysData } = useClientKeys()
   const { data: pricing } = usePricing()
+  const { data: accountPrices } = useAccountPrices()
+  const { data: credentialsData } = useBillingCredentials()
+  const unitCostMap = useMemo(
+    () => buildUnitCostMap(accountPrices, credentialsData?.credentials),
+    [accountPrices, credentialsData],
+  )
   const keyOptions = [
     { value: '', label: '全部 Key' },
     ...(keysData?.keys ?? []).map((k) => ({ value: String(k.id), label: k.name })),
@@ -652,7 +684,7 @@ export function TraceLogPage() {
                 </thead>
                 <tbody>
                   {records.map((rec) => (
-                    <TraceRow key={rec.traceId} rec={rec} pricing={pricing} />
+                    <TraceRow key={rec.traceId} rec={rec} pricing={pricing} unitCostMap={unitCostMap} />
                   ))}
                 </tbody>
               </table>

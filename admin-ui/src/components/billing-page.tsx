@@ -326,7 +326,7 @@ export function BillingPage() {
           />
           <DetailTable rows={rows} />
           <AccountPool rows={accountRows} onPriceChange={setPrice} />
-          <HistoryPool history={history} />
+          <HistoryPool history={history} onPriceChange={setPrice} />
           <PricingEditor
             pricing={pricing}
             models={usage.map((u) => u.model)}
@@ -596,6 +596,28 @@ function ProfitCell({ value, className }: { value: number; className?: string })
   )
 }
 
+/** 号价输入框：本地缓冲，onBlur 或回车时才保存，避免每次按键都发请求 */
+function PriceInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const [local, setLocal] = useState(String(value))
+  useEffect(() => { setLocal(String(value)) }, [value])
+  const commit = () => {
+    const v = parseFloat(local) || 0
+    if (v !== value) onChange(v)
+  }
+  return (
+    <Input
+      type="number"
+      step="any"
+      min={0}
+      value={local}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } }}
+      className="h-8 w-24 text-right text-sm tabular-nums ml-auto"
+    />
+  )
+}
+
 function AccountPool({
   rows,
   onPriceChange,
@@ -648,13 +670,9 @@ function AccountPool({
                       )}
                     </td>
                     <td className="px-3 py-3 text-right">
-                      <Input
-                        type="number"
-                        step="any"
-                        min={0}
+                      <PriceInput
                         value={a.price}
-                        onChange={(e) => onPriceChange(a.id, parseFloat(e.target.value) || 0)}
-                        className="h-8 w-24 text-right text-sm tabular-nums ml-auto"
+                        onChange={(v) => onPriceChange(a.id, v)}
                       />
                     </td>
                     <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">{a.usageLimit}</td>
@@ -681,7 +699,11 @@ function AccountPool({
   )
 }
 
-function HistoryPool({ history }: { history: HistoryAccount[] }) {
+function HistoryPool({ history, onPriceChange }: { history: HistoryAccount[]; onPriceChange: (id: number, price: number) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const [page, setPage] = useState(0)
+  const PAGE_SIZE = 20
+
   const totals = history.reduce(
     (acc, h) => ({
       price: acc.price + h.price,
@@ -690,65 +712,108 @@ function HistoryPool({ history }: { history: HistoryAccount[] }) {
     }),
     { price: 0, revenue: 0, profit: 0 },
   )
+
+  const totalPages = Math.ceil(history.length / PAGE_SIZE)
+  const pagedHistory = history.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+
   return (
     <Card className="mb-4">
       <CardContent className="p-5">
-        <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+        <button
+          type="button"
+          className="mb-1 flex w-full items-center gap-2 text-sm font-semibold text-left hover:text-primary transition-colors"
+          onClick={() => setExpanded((v) => !v)}
+        >
           <ScrollText className="h-4 w-4" />
           历史号（已删除 / 归档）
-        </div>
-        <p className="mb-3 text-xs text-muted-foreground">
-          号被删除时自动沉淀，永久保留，可随时回看每个号一生的盈亏。数字为该号存活期间的累计（与上方时间档无关）。
-        </p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border/60 text-xs text-muted-foreground">
-                <th className="px-3 py-3 text-left font-medium">账号</th>
-                <th className="px-3 py-3 text-left font-medium">归档原因</th>
-                <th className="px-3 py-3 text-left font-medium">归档时间</th>
-                <th className="px-3 py-3 text-right font-medium">号价</th>
-                <th className="px-3 py-3 text-right font-medium">一生 credit</th>
-                <th className="px-3 py-3 text-right font-medium">一生收入</th>
-                <th className="px-3 py-3 text-right font-medium">最终盈亏</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((h) => (
-                <tr key={h.id} className="border-b border-border/40 last:border-0">
-                  <td className="px-3 py-3">
-                    <div className="font-medium">{h.email}</div>
-                    <div className="text-xs text-muted-foreground">#{h.id}</div>
-                  </td>
-                  <td className="px-3 py-3 text-muted-foreground">{h.reason}</td>
-                  <td className="px-3 py-3 text-muted-foreground tabular-nums">{h.archivedAt}</td>
-                  <td className="px-3 py-3 text-right tabular-nums">{money(h.price)}</td>
-                  <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">{h.lifetimeCredits.toFixed(2)}</td>
-                  <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">{money(h.lifetimeRevenue)}</td>
-                  <ProfitCell value={h.lifetimeRevenue - h.price} className="px-3" />
-                </tr>
-              ))}
-              {history.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-3 py-6 text-center text-xs text-muted-foreground">
-                    暂无历史号。删除号池里的号时会自动归档到这里。
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-            <tfoot>
-              <tr className="border-t border-border/60 text-xs">
-                <td className="px-3 py-3 font-medium" colSpan={3}>
-                  历史合计
-                </td>
-                <td className="px-3 py-3 text-right tabular-nums">{money(totals.price)}</td>
-                <td className="px-3 py-3" />
-                <td className="px-3 py-3 text-right tabular-nums">{money(totals.revenue)}</td>
-                <ProfitCell value={totals.profit} className="px-3" />
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+          <span className="text-xs font-normal text-muted-foreground">({history.length})</span>
+          <span className="ml-auto text-xs font-normal text-muted-foreground">
+            {expanded ? '收起 ▲' : '展开 ▼'}
+          </span>
+        </button>
+        {expanded && (
+          <>
+            <p className="mb-3 text-xs text-muted-foreground">
+              号被删除时自动沉淀，永久保留，可随时回看每个号一生的盈亏。数字为该号存活期间的累计（与上方时间档无关）。
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border/60 text-xs text-muted-foreground">
+                    <th className="px-3 py-3 text-left font-medium">账号</th>
+                    <th className="px-3 py-3 text-left font-medium">归档原因</th>
+                    <th className="px-3 py-3 text-left font-medium">归档时间</th>
+                    <th className="px-3 py-3 text-right font-medium">号价</th>
+                    <th className="px-3 py-3 text-right font-medium">一生 credit</th>
+                    <th className="px-3 py-3 text-right font-medium">一生收入</th>
+                    <th className="px-3 py-3 text-right font-medium">最终盈亏</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedHistory.map((h) => (
+                    <tr key={h.id} className="border-b border-border/40 last:border-0">
+                      <td className="px-3 py-3">
+                        <div className="font-medium">{h.email}</div>
+                        <div className="text-xs text-muted-foreground">#{h.id}</div>
+                      </td>
+                      <td className="px-3 py-3 text-muted-foreground">{h.reason}</td>
+                      <td className="px-3 py-3 text-muted-foreground tabular-nums">{h.archivedAt}</td>
+                      <td className="px-3 py-3 text-right">
+                        <PriceInput value={h.price} onChange={(v) => onPriceChange(h.id, v)} />
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">{h.lifetimeCredits.toFixed(2)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">{money(h.lifetimeRevenue)}</td>
+                      <ProfitCell value={h.lifetimeRevenue - h.price} className="px-3" />
+                    </tr>
+                  ))}
+                  {history.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        暂无历史号。删除号池里的号时会自动归档到这里。
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-border/60 text-xs">
+                    <td className="px-3 py-3 font-medium" colSpan={3}>
+                      历史合计
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(totals.price)}</td>
+                    <td className="px-3 py-3" />
+                    <td className="px-3 py-3 text-right tabular-nums">{money(totals.revenue)}</td>
+                    <ProfitCell value={totals.profit} className="px-3" />
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            {totalPages > 1 && (
+              <div className="mt-3 flex items-center justify-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  disabled={page === 0}
+                  onClick={() => setPage((p) => p - 1)}
+                >
+                  上一页
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {page + 1} / {totalPages}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  disabled={page >= totalPages - 1}
+                  onClick={() => setPage((p) => p + 1)}
+                >
+                  下一页
+                </Button>
+              </div>
+            )}
+          </>
+        )}
       </CardContent>
     </Card>
   )
