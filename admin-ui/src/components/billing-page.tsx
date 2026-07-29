@@ -254,6 +254,30 @@ export function BillingPage() {
   const cost = useMemo(() => computeWindowCost(accounts, usage), [accounts, usage])
   const rows = useMemo(() => computeRows(usage, pricing, cost.cost), [usage, pricing, cost])
 
+  // 按厂商分组汇总
+  const providerTotals = useMemo(() => {
+    const claude = { revenue: 0, noCacheRevenue: 0, cost: 0, rawCache: 0, rawNoCache: 0 }
+    const gpt = { revenue: 0, noCacheRevenue: 0, cost: 0, rawCache: 0, rawNoCache: 0 }
+    for (const r of rows) {
+      const lower = r.usage.model.toLowerCase()
+      const target = lower.includes('gpt') ? gpt : claude
+      target.revenue += r.revenue
+      target.noCacheRevenue += r.noCacheRevenue
+      target.cost += r.cost
+      // raw token value（未乘倍率的裸收入基数）
+      const p = pricing.models[r.usage.model] ?? { inputPrice: 0, outputPrice: 0, cacheWritePrice: 0, cacheReadPrice: 0 }
+      const rawC = (r.usage.inputTokens / M) * p.inputPrice +
+        (r.usage.outputTokens / M) * p.outputPrice +
+        (r.usage.cacheWriteTokens / M) * p.cacheWritePrice +
+        (r.usage.cacheReadTokens / M) * p.cacheReadPrice
+      const rawNC = ((r.usage.inputTokens + r.usage.cacheWriteTokens + r.usage.cacheReadTokens) / M) * p.inputPrice +
+        (r.usage.outputTokens / M) * p.outputPrice
+      target.rawCache += rawC
+      target.rawNoCache += rawNC
+    }
+    return { claude, gpt }
+  }, [rows, pricing])
+
   const totals = useMemo(() => {
     return rows.reduce(
       (acc, r) => ({
@@ -266,9 +290,7 @@ export function BillingPage() {
 
   const totalCost = cost.cost
   const profit = totals.revenue - totalCost
-  const noCacheProfit = totals.noCacheRevenue - totalCost
-  const margin = totals.revenue > 0 ? (profit / totals.revenue) * 100 : 0
-  const noCacheMargin = totals.noCacheRevenue > 0 ? (noCacheProfit / totals.noCacheRevenue) * 100 : 0
+  const margin = totalCost > 0 ? (profit / totalCost) * 100 : 0
 
   // 每个号本时段的盈亏：各号独立单价 × 本时段消耗
   const accountRows = useMemo<AccountRow[]>(() => {
@@ -330,15 +352,8 @@ export function BillingPage() {
             totalCost={totalCost}
             totalInvest={cost.totalInvest}
           />
-          <ProfitCards
-            revenue={totals.revenue}
-            profit={profit}
-            margin={margin}
-            cost={totalCost}
-            noCacheRevenue={totals.noCacheRevenue}
-            noCacheProfit={noCacheProfit}
-            noCacheMargin={noCacheMargin}
-          />
+          <ProfitCards providerTotals={providerTotals} />
+          <MultiplierRecommender providerTotals={providerTotals} />
           <DetailTable rows={rows} />
           <AccountPool rows={accountRows} onPriceChange={setPrice} />
           <HistoryPool history={history} onPriceChange={setPrice} />
@@ -465,29 +480,138 @@ function SummaryCards(props: {
   )
 }
 
-function ProfitCards(props: {
-  revenue: number
-  profit: number
-  margin: number
-  cost: number
-  noCacheRevenue: number
-  noCacheProfit: number
-  noCacheMargin: number
-}) {
+interface ProviderTotals {
+  claude: { revenue: number; noCacheRevenue: number; cost: number; rawCache: number; rawNoCache: number }
+  gpt: { revenue: number; noCacheRevenue: number; cost: number; rawCache: number; rawNoCache: number }
+}
+
+function ProfitCards({ providerTotals }: { providerTotals: ProviderTotals }) {
+  const { claude, gpt } = providerTotals
+  const claudeProfit = claude.revenue - claude.cost
+  const claudeMargin = claude.cost > 0 ? (claudeProfit / claude.cost) * 100 : 0
+  const claudeNCProfit = claude.noCacheRevenue - claude.cost
+  const claudeNCMargin = claude.cost > 0 ? (claudeNCProfit / claude.cost) * 100 : 0
+  const gptProfit = gpt.revenue - gpt.cost
+  const gptMargin = gpt.cost > 0 ? (gptProfit / gpt.cost) * 100 : 0
+  const gptNCProfit = gpt.noCacheRevenue - gpt.cost
+  const gptNCMargin = gpt.cost > 0 ? (gptNCProfit / gpt.cost) * 100 : 0
   return (
-    <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-      <ProfitCard
-        title="有缓存计费"
-        revenue={props.revenue}
-        profit={props.profit}
-        margin={props.margin}
-      />
-      <ProfitCard
-        title="无缓存计费"
-        revenue={props.noCacheRevenue}
-        profit={props.noCacheProfit}
-        margin={props.noCacheMargin}
-      />
+    <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
+      <ProfitCard title="Claude 有缓存" revenue={claude.revenue} profit={claudeProfit} margin={claudeMargin} />
+      <ProfitCard title="Claude 无缓存" revenue={claude.noCacheRevenue} profit={claudeNCProfit} margin={claudeNCMargin} />
+      <ProfitCard title="GPT 有缓存" revenue={gpt.revenue} profit={gptProfit} margin={gptMargin} />
+      <ProfitCard title="GPT 无缓存" revenue={gpt.noCacheRevenue} profit={gptNCProfit} margin={gptNCMargin} />
+    </div>
+  )
+}
+
+const RATIO_PRESETS = [0, 0.3, 0.5, 0.8, 1.0]
+
+/** 推荐倍率计算器：输入目标利润率，反推不同 cacheReportRatio 下需要多少倍率 */
+function MultiplierRecommender({ providerTotals }: { providerTotals: ProviderTotals }) {
+  const [targetMargin, setTargetMargin] = useState(30)
+
+  // 根据 ratio 计算 raw token value（不同 ratio 下缓存折算方式不同）
+  // ratio=1：原样，ratio=0：缓存全折算为输入
+  // 这里用 providerTotals 里的 rawCache（ratio=1）和 rawNoCache（ratio=0）做线性插值
+  const computeRecommended = (provider: 'claude' | 'gpt') => {
+    const data = providerTotals[provider]
+    if (data.cost <= 0) return null
+    const targetRevenue = data.cost * (1 + targetMargin / 100)
+    if (!Number.isFinite(targetRevenue) || targetRevenue <= 0) return null
+
+    return RATIO_PRESETS.map((ratio) => {
+      // raw value 在 ratio=1（rawCache）和 ratio=0（rawNoCache）之间线性插值
+      const rawValue = data.rawNoCache + ratio * (data.rawCache - data.rawNoCache)
+      const multiplier = rawValue > 0 ? targetRevenue / rawValue : 0
+      return { ratio, multiplier }
+    })
+  }
+
+  const claudeRecs = computeRecommended('claude')
+  const gptRecs = computeRecommended('gpt')
+
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <TrendingUp className="h-4 w-4" />
+            推荐倍率计算器
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">目标利润率</span>
+            <Input
+              type="number"
+              step="any"
+              min={0}
+              max={99}
+              value={targetMargin}
+              onChange={(e) => setTargetMargin(parseFloat(e.target.value) || 0)}
+              className="h-8 w-20 text-right text-sm tabular-nums"
+            />
+            <span className="text-xs text-muted-foreground">%</span>
+          </div>
+        </div>
+        <p className="mb-3 text-xs text-muted-foreground">
+          根据当前时段真实用量与成本，反推在不同缓存上报比例下需要设置多少倍率才能达到目标利润率。
+          利润率 = (收入 − 成本) ÷ 成本。
+        </p>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          {claudeRecs && (
+            <RecommenderTable title="Claude" recs={claudeRecs} cost={providerTotals.claude.cost} targetMargin={targetMargin} />
+          )}
+          {gptRecs && (
+            <RecommenderTable title="GPT" recs={gptRecs} cost={providerTotals.gpt.cost} targetMargin={targetMargin} />
+          )}
+          {!claudeRecs && !gptRecs && (
+            <p className="text-xs text-muted-foreground col-span-2 py-4 text-center">
+              本时段无用量数据，无法计算推荐倍率。
+            </p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function RecommenderTable({ title, recs, cost, targetMargin }: {
+  title: string
+  recs: Array<{ ratio: number; multiplier: number }>
+  cost: number
+  targetMargin: number
+}) {
+  const targetRevenue = cost * (1 + targetMargin / 100)
+  return (
+    <div className="rounded-xl border border-border/50 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-medium">{title}</span>
+        <span className="text-xs text-muted-foreground">
+          成本 {money(cost)} → 目标收入 {money(Number.isFinite(targetRevenue) ? targetRevenue : 0)}
+        </span>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-border/60 text-muted-foreground">
+            <th className="py-2 text-left font-medium">缓存上报比例</th>
+            <th className="py-2 text-left font-medium">场景</th>
+            <th className="py-2 text-right font-medium">推荐倍率</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recs.map((r) => (
+            <tr key={r.ratio} className="border-b border-border/30 last:border-0">
+              <td className="py-2 tabular-nums">{r.ratio.toFixed(1)}</td>
+              <td className="py-2 text-muted-foreground">
+                {r.ratio === 0 ? '无缓存组' : r.ratio === 1 ? '全缓存组' : r.ratio <= 0.3 ? '低缓存组' : '高缓存组'}
+              </td>
+              <td className="py-2 text-right font-mono font-medium tabular-nums text-primary">
+                {r.multiplier > 0 ? r.multiplier.toFixed(4) : '—'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
