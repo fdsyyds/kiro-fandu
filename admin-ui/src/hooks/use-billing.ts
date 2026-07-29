@@ -86,7 +86,10 @@ export function useSetAccountPrice() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ id, price }: { id: number; price: number }) => setAccountPrice(id, price),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['billing', 'account-prices'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['billing', 'account-prices'] })
+      qc.invalidateQueries({ queryKey: ['billing', 'history'] })
+    },
   })
 }
 
