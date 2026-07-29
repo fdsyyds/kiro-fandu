@@ -774,6 +774,9 @@ pub struct ClientKeyItem {
     /// 是否系统密钥（由 config.json apiKey 同步，不可删除、可轮换）
     #[serde(default)]
     pub is_system: bool,
+    /// 缓存上报比例（0.0~1.0），None 表示使用默认值 1.0
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_report_ratio: Option<f64>,
 }
 
 /// 客户端 Key 列表响应
@@ -813,6 +816,9 @@ pub struct UpdateClientKeyRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    /// 缓存上报比例（0.0~1.0），null 表示不修改
+    #[serde(default)]
+    pub cache_report_ratio: Option<f64>,
 }
 
 // ============ IdC 设备授权登录 ============

@@ -80,6 +80,18 @@ interface HistoryAccount {
 
 const M = 1_000_000
 
+/** 根据模型名获取对应厂商的倍率 */
+function multipliersForModel(model: string, pricing: Pricing): { cacheMult: number; noCacheMult: number } {
+  const lower = model.toLowerCase()
+  if (lower.includes('claude')) {
+    return { cacheMult: pricing.claudeCacheMultiplier, noCacheMult: pricing.claudeNoCacheMultiplier }
+  } else if (lower.includes('gpt')) {
+    return { cacheMult: pricing.gptCacheMultiplier, noCacheMult: pricing.gptNoCacheMultiplier }
+  }
+  // 未知厂商回退 Claude 倍率
+  return { cacheMult: pricing.claudeCacheMultiplier, noCacheMult: pricing.claudeNoCacheMultiplier }
+}
+
 /** 某模型的收入（有缓存/无缓存两口径），不含成本 */
 function modelRevenue(u: ModelUsage, pricing: Pricing) {
   const p =
@@ -93,9 +105,10 @@ function modelRevenue(u: ModelUsage, pricing: Pricing) {
   const rawNoCache =
     ((u.inputTokens + u.cacheWriteTokens + u.cacheReadTokens) / M) * p.inputPrice +
     (u.outputTokens / M) * p.outputPrice
+  const { cacheMult, noCacheMult } = multipliersForModel(u.model, pricing)
   return {
-    revenue: rawRevenue * pricing.cacheMultiplier,
-    noCacheRevenue: rawNoCache * pricing.noCacheMultiplier,
+    revenue: rawRevenue * cacheMult,
+    noCacheRevenue: rawNoCache * noCacheMult,
   }
 }
 
@@ -190,7 +203,7 @@ export function BillingPage() {
   useEffect(() => {
     if (pricingQ.data) setPricingDraft(pricingQ.data)
   }, [pricingQ.data])
-  const pricing: Pricing = pricingDraft ?? { cacheMultiplier: 0.08, noCacheMultiplier: 0.12, cacheReportRatio: 1.0, models: {} }
+  const pricing: Pricing = pricingDraft ?? { claudeCacheMultiplier: 0.1, claudeNoCacheMultiplier: 0.12, gptCacheMultiplier: 0.1, gptNoCacheMultiplier: 0.12, models: {} }
 
   // by-model → ModelUsage（cacheCreation 记为 cacheWrite）
   const usage = useMemo<ModelUsage[]>(() => {
@@ -834,7 +847,7 @@ function PricingEditor({
   onSave: () => void
   saving: boolean
 }) {
-  const setGlobal = (key: 'cacheMultiplier' | 'noCacheMultiplier' | 'cacheReportRatio', v: number) =>
+  const setGlobal = (key: 'claudeCacheMultiplier' | 'claudeNoCacheMultiplier' | 'gptCacheMultiplier' | 'gptNoCacheMultiplier', v: number) =>
     onChange({ ...pricing, [key]: v })
 
   const setModel = (model: string, key: keyof ModelPrice, v: number) => {
@@ -877,24 +890,30 @@ function PricingEditor({
           </Button>
         </div>
 
-        <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <PriceField
-            label="有缓存倍率"
+            label="Claude 有缓存倍率"
             suffix="×"
-            value={pricing.cacheMultiplier}
-            onChange={(v) => setGlobal('cacheMultiplier', v)}
+            value={pricing.claudeCacheMultiplier}
+            onChange={(v) => setGlobal('claudeCacheMultiplier', v)}
           />
           <PriceField
-            label="无缓存倍率"
+            label="Claude 无缓存倍率"
             suffix="×"
-            value={pricing.noCacheMultiplier}
-            onChange={(v) => setGlobal('noCacheMultiplier', v)}
+            value={pricing.claudeNoCacheMultiplier}
+            onChange={(v) => setGlobal('claudeNoCacheMultiplier', v)}
           />
           <PriceField
-            label="缓存上报比例"
-            suffix="0~1"
-            value={pricing.cacheReportRatio}
-            onChange={(v) => setGlobal('cacheReportRatio', v)}
+            label="GPT 有缓存倍率"
+            suffix="×"
+            value={pricing.gptCacheMultiplier}
+            onChange={(v) => setGlobal('gptCacheMultiplier', v)}
+          />
+          <PriceField
+            label="GPT 无缓存倍率"
+            suffix="×"
+            value={pricing.gptNoCacheMultiplier}
+            onChange={(v) => setGlobal('gptNoCacheMultiplier', v)}
           />
         </div>
 

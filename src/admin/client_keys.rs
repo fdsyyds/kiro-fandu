@@ -55,6 +55,10 @@ pub struct ClientKey {
     /// 老数据无此字段，默认 false。
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_system: bool,
+    /// 缓存上报比例（0.0~1.0）：返回给客户端的 cache_read 按此比例缩减。
+    /// None 表示使用默认值 1.0（原样上报）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_report_ratio: Option<f64>,
 }
 
 /// `by_key` 仅用于判重；鉴权扫描 `entries` 并做常量时间比较。
@@ -179,6 +183,7 @@ impl ClientKeyManager {
             total_credits: 0.0,
             group: group.filter(|g| !g.trim().is_empty()),
             is_system: false,
+            cache_report_ratio: None,
         };
         inner.by_key.insert(plaintext, id);
         inner.entries.insert(id, entry.clone());
@@ -222,6 +227,7 @@ impl ClientKeyManager {
                     total_credits: 0.0,
                     group: None,
                     is_system: true,
+                    cache_report_ratio: None,
                 },
             );
             changed = true;
@@ -298,6 +304,7 @@ impl ClientKeyManager {
         name: Option<String>,
         description: Option<Option<String>>,
         group: Option<Option<String>>,
+        cache_report_ratio: Option<Option<f64>>,
     ) -> bool {
         let mut inner = self.inner.write();
         let updated = match inner.entries.get_mut(&id) {
@@ -310,6 +317,9 @@ impl ClientKeyManager {
                 }
                 if let Some(g) = group {
                     e.group = g.filter(|s| !s.trim().is_empty());
+                }
+                if let Some(r) = cache_report_ratio {
+                    e.cache_report_ratio = r;
                 }
                 true
             }
@@ -324,6 +334,16 @@ impl ClientKeyManager {
     /// 返回指定 Key 绑定的分组名（None 表示未绑定或 Key 不存在）
     pub fn group_of(&self, id: u64) -> Option<String> {
         self.inner.read().entries.get(&id).and_then(|e| e.group.clone())
+    }
+
+    /// 返回指定 Key 的缓存上报比例（默认 1.0）
+    pub fn cache_report_ratio_of(&self, id: u64) -> f64 {
+        self.inner
+            .read()
+            .entries
+            .get(&id)
+            .and_then(|e| e.cache_report_ratio)
+            .unwrap_or(1.0)
     }
 
     /// 列出所有当前被引用的分组名（仅去重，不带计数）。

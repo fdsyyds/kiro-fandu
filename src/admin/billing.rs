@@ -29,30 +29,46 @@ pub struct ModelPrice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pricing {
-    /// 有缓存收入倍率
-    pub cache_multiplier: f64,
-    /// 无缓存收入倍率
-    pub no_cache_multiplier: f64,
-    /// 缓存上报比例（0.0~1.0）：返回给客户端的 cache_read 按此比例缩减，
-    /// 多出来的部分归入 input_tokens。1.0=原样上报，0.0=全部报为 input。
-    #[serde(default = "default_cache_report_ratio")]
-    pub cache_report_ratio: f64,
+    /// Claude 有缓存收入倍率
+    #[serde(default)]
+    pub claude_cache_multiplier: f64,
+    /// Claude 无缓存收入倍率
+    #[serde(default)]
+    pub claude_no_cache_multiplier: f64,
+    /// GPT 有缓存收入倍率
+    #[serde(default)]
+    pub gpt_cache_multiplier: f64,
+    /// GPT 无缓存收入倍率
+    #[serde(default)]
+    pub gpt_no_cache_multiplier: f64,
     /// 按模型名索引的售价
     #[serde(default)]
     pub models: HashMap<String, ModelPrice>,
 }
 
-fn default_cache_report_ratio() -> f64 {
-    1.0
-}
-
 impl Default for Pricing {
     fn default() -> Self {
         Self {
-            cache_multiplier: 0.1,
-            no_cache_multiplier: 0.12,
-            cache_report_ratio: 1.0,
+            claude_cache_multiplier: 0.1,
+            claude_no_cache_multiplier: 0.12,
+            gpt_cache_multiplier: 0.1,
+            gpt_no_cache_multiplier: 0.12,
             models: HashMap::new(),
+        }
+    }
+}
+
+impl Pricing {
+    /// 根据模型名获取对应厂商的倍率 (cache_multiplier, no_cache_multiplier)
+    pub fn multipliers_for_model(&self, model: &str) -> (f64, f64) {
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("claude") {
+            (self.claude_cache_multiplier, self.claude_no_cache_multiplier)
+        } else if lower.contains("gpt") {
+            (self.gpt_cache_multiplier, self.gpt_no_cache_multiplier)
+        } else {
+            // 未知厂商回退到 Claude 倍率
+            (self.claude_cache_multiplier, self.claude_no_cache_multiplier)
         }
     }
 }
@@ -240,8 +256,10 @@ mod tests {
     #[test]
     fn default_pricing_has_multipliers() {
         let p = Pricing::default();
-        assert!(p.cache_multiplier > 0.0);
-        assert!(p.no_cache_multiplier > 0.0);
+        assert!(p.claude_cache_multiplier > 0.0);
+        assert!(p.claude_no_cache_multiplier > 0.0);
+        assert!(p.gpt_cache_multiplier > 0.0);
+        assert!(p.gpt_no_cache_multiplier > 0.0);
         assert!(p.models.is_empty());
     }
 
@@ -300,7 +318,7 @@ mod tests {
 
         let store = BillingStore::load(&path).unwrap();
         let mut pricing = Pricing::default();
-        pricing.cache_multiplier = 0.15;
+        pricing.claude_cache_multiplier = 0.15;
         pricing.models.insert(
             "claude-opus-5".into(),
             ModelPrice {
@@ -314,7 +332,7 @@ mod tests {
         store.set_account_price(1, 8.0);
 
         let store2 = BillingStore::load(&path).unwrap();
-        assert_eq!(store2.pricing().cache_multiplier, 0.15);
+        assert_eq!(store2.pricing().claude_cache_multiplier, 0.15);
         assert_eq!(store2.pricing().models.len(), 1);
         assert_eq!(store2.account_price(1), Some(8.0));
 

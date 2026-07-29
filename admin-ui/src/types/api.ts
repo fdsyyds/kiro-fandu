@@ -375,6 +375,8 @@ export interface ClientKeyItem {
   group?: string
   /** 是否系统密钥（由 config.json apiKey 同步，不可删除、可轮换） */
   isSystem: boolean
+  /** 缓存上报比例（0~1），undefined 表示默认 1.0 */
+  cacheReportRatio?: number
 }
 
 export interface ClientKeysResponse {
@@ -400,6 +402,7 @@ export interface UpdateClientKeyRequest {
   name?: string
   description?: string
   group?: string
+  cacheReportRatio?: number
 }
 
 // ============ 用量统计 ============

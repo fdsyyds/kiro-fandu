@@ -655,9 +655,9 @@ pub async fn post_messages(
     }
     let hook = UsageRecordHook::from_state(&state, key_ctx.key_id, payload.model.clone());
     let cache_report_ratio = state
-        .billing_store
+        .client_keys
         .as_ref()
-        .map(|s| s.pricing().cache_report_ratio)
+        .map(|ck| ck.cache_report_ratio_of(key_ctx.key_id))
         .unwrap_or(1.0);
 
     // 提前创建 tracer，确保所有路径（包括 WebSearch）都能写入 traces.db
@@ -1459,9 +1459,9 @@ pub async fn post_messages_cc(
     );
     let hook = UsageRecordHook::from_state(&state, key_ctx.key_id, payload.model.clone());
     let cache_report_ratio = state
-        .billing_store
+        .client_keys
         .as_ref()
-        .map(|s| s.pricing().cache_report_ratio)
+        .map(|ck| ck.cache_report_ratio_of(key_ctx.key_id))
         .unwrap_or(1.0);
 
     // 提前创建 tracer，确保所有路径（包括 WebSearch）都能写入 traces.db

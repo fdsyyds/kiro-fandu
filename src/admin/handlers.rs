@@ -374,7 +374,7 @@ fn build_archive_snapshot(state: &AdminState, id: u64) -> Option<super::billing:
     })
 }
 
-/// 按定价把某窗口内各模型用量折算成"有缓存"口径的总收入（× cacheMultiplier）。
+/// 按定价把某窗口内各模型用量折算成"有缓存"口径的总收入（按模型厂商选倍率）。
 fn total_pool_revenue(
     state: &AdminState,
     window: StatsQueryWindow,
@@ -382,17 +382,18 @@ fn total_pool_revenue(
 ) -> f64 {
     const M: f64 = 1_000_000.0;
     let models = state.usage_aggregator.query_by_model(window, None);
-    let raw: f64 = models
+    models
         .iter()
         .map(|m| {
             let p = pricing.models.get(&m.model).cloned().unwrap_or_default();
-            (m.input_tokens as f64 / M) * p.input_price
+            let raw = (m.input_tokens as f64 / M) * p.input_price
                 + (m.output_tokens as f64 / M) * p.output_price
                 + (m.cache_creation_tokens as f64 / M) * p.cache_write_price
-                + (m.cache_read_tokens as f64 / M) * p.cache_read_price
+                + (m.cache_read_tokens as f64 / M) * p.cache_read_price;
+            let (cache_mult, _) = pricing.multipliers_for_model(&m.model);
+            raw * cache_mult
         })
-        .sum();
-    raw * pricing.cache_multiplier
+        .sum()
 }
 
 /// PUT /api/admin/credentials/:id
@@ -918,6 +919,7 @@ fn key_to_item(k: &super::client_keys::ClientKey) -> ClientKeyItem {
         total_cache_read_tokens: k.total_cache_read_tokens,
         group: k.group.clone(),
         is_system: k.is_system,
+        cache_report_ratio: k.cache_report_ratio,
     }
 }
 
@@ -1012,7 +1014,8 @@ pub async fn update_client_key(
             let t = g.trim();
             if t.is_empty() { None } else { Some(t.to_string()) }
         });
-    if state.client_keys.update_meta(id, payload.name, description, group) {
+    let cache_report_ratio = payload.cache_report_ratio.map(|r| Some(r.clamp(0.0, 1.0)));
+    if state.client_keys.update_meta(id, payload.name, description, group, cache_report_ratio) {
         Json(SuccessResponse::new(format!("Key #{} 已更新", id))).into_response()
     } else {
         (

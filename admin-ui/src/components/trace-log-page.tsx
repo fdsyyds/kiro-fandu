@@ -122,7 +122,7 @@ function formatTokenFull(n: number): string {
 
 const M = 1_000_000
 
-/** 计算单条请求的用户扣费：应用 cacheReportRatio 后的 token × 模型价格 × 倍率 */
+/** 计算单条请求的用户扣费：token × 模型价格 × 倍率（trace 记录的是真实值） */
 function computeUserCharge(rec: TraceRecord, pricing: Pricing | undefined): number | null {
   if (!pricing) return null
   const input = rec.inputTokens ?? 0
@@ -132,16 +132,17 @@ function computeUserCharge(rec: TraceRecord, pricing: Pricing | undefined): numb
   if (input + output + cacheWrite + cacheRead === 0) return null
   const p = pricing.models[rec.model]
   if (!p) return null
-  // 应用缓存上报比例：cache_read 按 ratio 缩减，多出部分归入 input
-  const ratio = pricing.cacheReportRatio ?? 1.0
-  const reportedRead = Math.round(cacheRead * ratio)
-  const adjustedInput = input + (cacheRead - reportedRead)
   const raw =
-    (adjustedInput / M) * p.inputPrice +
+    (input / M) * p.inputPrice +
     (output / M) * p.outputPrice +
     (cacheWrite / M) * p.cacheWritePrice +
-    (reportedRead / M) * p.cacheReadPrice
-  return raw * pricing.cacheMultiplier
+    (cacheRead / M) * p.cacheReadPrice
+  // 按模型厂商选倍率
+  const lower = rec.model.toLowerCase()
+  const mult = lower.includes('gpt')
+    ? pricing.gptCacheMultiplier
+    : pricing.claudeCacheMultiplier
+  return raw * mult
 }
 
 function formatCharge(v: number | null): string {
@@ -256,8 +257,8 @@ function AttemptRow({ a }: { a: TraceAttempt }) {
 }
 
 /** 可展开的链路行 */
-/** Token 用量单元格：按 cacheReportRatio 调整后展示，hover 显示分项明细 */
-function TokenCell({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | undefined }) {
+/** Token 用量单元格：展示真实 token 分项明细 */
+function TokenCell({ rec }: { rec: TraceRecord; pricing: Pricing | undefined }) {
   const input = rec.inputTokens ?? 0
   const output = rec.outputTokens ?? 0
   const cacheCreation = rec.cacheCreationTokens ?? 0
@@ -267,23 +268,19 @@ function TokenCell({ rec, pricing }: { rec: TraceRecord; pricing: Pricing | unde
   if (total === 0) {
     return <span className="text-muted-foreground">—</span>
   }
-  // 应用缓存上报比例
-  const ratio = pricing?.cacheReportRatio ?? 1.0
-  const reportedRead = Math.round(cacheRead * ratio)
-  const adjustedInput = input + (cacheRead - reportedRead)
   const rows: Array<[string, number]> = [
-    ['输入 Token', adjustedInput],
+    ['输入 Token', input],
     ['输出 Token', output],
   ]
   if (cacheCreation > 0) rows.push(['缓存创建 Token', cacheCreation])
-  if (reportedRead > 0) rows.push(['缓存读取 Token', reportedRead])
+  if (cacheRead > 0) rows.push(['缓存读取 Token', cacheRead])
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex items-center gap-1 font-mono tabular-nums cursor-default border-b border-dotted border-muted-foreground/40">
             <span className="text-emerald-600 dark:text-emerald-400">
-              ↓{formatTokens(adjustedInput + cacheCreation + reportedRead)}
+              ↓{formatTokens(input + cacheCreation + cacheRead)}
             </span>
             <span className="text-violet-600 dark:text-violet-400">
               ↑{formatTokens(output)}

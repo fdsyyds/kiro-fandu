@@ -64,6 +64,7 @@ export function ClientKeysPage() {
   const [editName, setEditName] = useState('')
   const [editDesc, setEditDesc] = useState('')
   const [editGroup, setEditGroup] = useState('')
+  const [editCacheRatio, setEditCacheRatio] = useState('')
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -164,6 +165,7 @@ export function ClientKeysPage() {
     setEditName(item.name)
     setEditDesc(item.description ?? '')
     setEditGroup(item.group ?? '')
+    setEditCacheRatio(String(item.cacheReportRatio ?? 1))
     setEditOpen(true)
   }
 
@@ -171,9 +173,11 @@ export function ClientKeysPage() {
     e.preventDefault()
     if (!editTarget) return
     try {
+      const ratioVal = parseFloat(editCacheRatio)
+      const cacheReportRatio = Number.isFinite(ratioVal) ? Math.max(0, Math.min(1, ratioVal)) : undefined
       await updateKey.mutateAsync({
         id: editTarget.id,
-        req: { name: editName.trim(), description: editDesc.trim(), group: editGroup.trim() },
+        req: { name: editName.trim(), description: editDesc.trim(), group: editGroup.trim(), cacheReportRatio },
       })
       toast.success('已更新')
       setEditOpen(false)
@@ -482,6 +486,21 @@ export function ClientKeysPage() {
               />
               <p className="mt-1 text-[11px] text-muted-foreground">
                 绑定后仅调度该分组内账号（严格隔离）。选「不绑定」表示解除绑定。
+              </p>
+            </div>
+            <div>
+              <label className="text-[12px] text-muted-foreground">缓存上报比例</label>
+              <Input
+                type="number"
+                step="any"
+                min={0}
+                max={1}
+                value={editCacheRatio}
+                onChange={(e) => setEditCacheRatio(e.target.value)}
+                placeholder="0~1，默认 1.0（原样上报）"
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                0=不上报缓存（无缓存组），1=原样上报（高缓存组），介于之间为低缓存组。
               </p>
             </div>
             <DialogFooter>

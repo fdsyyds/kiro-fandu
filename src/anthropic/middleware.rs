@@ -51,7 +51,7 @@ pub struct AppState {
     pub cache_meter: Option<SharedCacheMeter>,
     /// 请求链路追踪存储（SQLite，可选）
     pub trace_store: Option<SharedTraceStore>,
-    /// 计费配置存储（可选，用于读取 cache_report_ratio）
+    /// 计费配置存储（可选，用于读取定价倍率等）
     pub billing_store: Option<SharedBillingStore>,
 }
 
