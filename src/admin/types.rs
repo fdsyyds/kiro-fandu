@@ -74,6 +74,12 @@ pub struct CredentialStatusItem {
     /// 账号来源渠道（纯备注）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_channel: Option<String>,
+    /// 账号级风控 / 普通 429 冷却剩余秒数（>0 表示冷却中）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub throttled_remaining_secs: Option<u64>,
+    /// 当前冷却是否由普通 429 限流触发（true = 普通限流，false = 账号级风控）
+    #[serde(default)]
+    pub is_rate_limited: bool,
     /// 凭据余额（从缓存中读取的最近一次结果，可能为 None）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance: Option<BalanceResponse>,

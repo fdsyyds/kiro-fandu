@@ -570,6 +570,8 @@ impl AdminService {
                     endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
                     groups: entry.groups,
                     source_channel: entry.source_channel,
+                    throttled_remaining_secs: entry.throttled_remaining_secs,
+                    is_rate_limited: entry.is_rate_limited,
                     balance,
                     balance_updated_at,
                 }

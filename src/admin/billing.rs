@@ -163,10 +163,16 @@ impl BillingStore {
         self.inner.read().account_prices.get(&id).copied()
     }
 
-    /// 设置单个号价
+    /// 设置单个号价（同时更新 history 中同 id 的归档记录）
     pub fn set_account_price(&self, id: u64, price: f64) {
         let mut inner = self.inner.write();
         inner.account_prices.insert(id, price);
+        // 同步更新历史归档里同 id 的号价，使前端历史号价可编辑
+        for archived in inner.history.iter_mut() {
+            if archived.id == id {
+                archived.price = price;
+            }
+        }
         self.save_locked(&inner);
     }
 
