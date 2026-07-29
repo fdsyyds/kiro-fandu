@@ -631,6 +631,7 @@ mod tests {
             Some("保留名称".into()),
             Some(Some("保留描述".into())),
             Some(Some("group-a".into())),
+            None,
         );
         mgr.record_usage(0, 100, 50, 5, 10, 1.5);
         assert_eq!(mgr.verify_and_touch("custom-a"), Some(0));
