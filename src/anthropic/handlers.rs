@@ -659,12 +659,24 @@ pub async fn post_messages(
         .as_ref()
         .map(|s| s.pricing().cache_report_ratio)
         .unwrap_or(1.0);
+
+    // 提前创建 tracer，确保所有路径（包括 WebSearch）都能写入 traces.db
+    let tracer = std::sync::Arc::new(RequestTracer::new(
+        &state,
+        RequestTraceOptions {
+            key_ctx: key_ctx.clone(),
+            model: payload.model.clone(),
+            is_stream: payload.stream,
+        },
+    ));
+
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
         Some(p) => p.clone(),
         None => {
             tracing::error!("KiroProvider 未配置");
             hook.record(0, 0, 0, 0, 0, 0.0, "error");
+            tracer.finalize("error", Some("provider_unavailable"), Some("Kiro API provider not configured"), None, TraceUsage::zero());
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorResponse::new(
@@ -701,6 +713,7 @@ pub async fn post_messages(
         // WebSearch 路径走 MCP 端点，没有 credential_id 上下文，统一记 0
         let status = if resp.status().is_success() { "success" } else { "error" };
         hook.record(0, input_tokens, 0, 0, 0, 0.0, status);
+        tracer.finalize(status, None, None, None, TraceUsage { input_tokens: input_tokens.max(0) as u64, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, credits: 0.0 });
         return resp;
     }
 
@@ -709,7 +722,7 @@ pub async fn post_messages(
     // where the upstream may return a tool_use with name=web_search. Take the internal agentic loop: search internally and feed the results back.
     if websearch::has_web_search_among_tools(&payload) {
         tracing::info!("detected mixed tools containing web_search, entering the web_search agentic loop");
-        return super::websearch_loop::run_web_search_loop(provider, payload, hook, payload_stream, key_ctx.group.clone(), state.tool_compatibility_mode)
+        return super::websearch_loop::run_web_search_loop(provider, payload, hook, payload_stream, key_ctx.group.clone(), state.tool_compatibility_mode, tracer)
             .await;
     }
 
@@ -730,6 +743,7 @@ pub async fn post_messages(
             };
             tracing::warn!("请求转换失败: {}", e);
             hook.record(0, 0, 0, 0, 0, 0.0, "error");
+            tracer.finalize("error", Some("invalid_request"), Some(&message), None, TraceUsage::zero());
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(error_type, message)),
@@ -751,6 +765,7 @@ pub async fn post_messages(
         Err(e) => {
             tracing::error!("序列化请求失败: {}", e);
             hook.record(0, 0, 0, 0, 0, 0.0, "error");
+            tracer.finalize("error", Some("internal_error"), Some(&format!("序列化请求失败: {}", e)), None, TraceUsage::zero());
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new(
@@ -792,14 +807,6 @@ pub async fn post_messages(
 
     if payload.stream {
         // 流式响应
-        let tracer = std::sync::Arc::new(RequestTracer::new(
-            &state,
-            RequestTraceOptions {
-                key_ctx: key_ctx.clone(),
-                model: payload.model.clone(),
-                is_stream: true,
-            },
-        ));
         handle_stream_request(
             provider,
             &request_body,
@@ -818,14 +825,6 @@ pub async fn post_messages(
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        let tracer = std::sync::Arc::new(RequestTracer::new(
-            &state,
-            RequestTraceOptions {
-                key_ctx: key_ctx.clone(),
-                model: payload.model.clone(),
-                is_stream: false,
-            },
-        ));
         handle_non_stream_request(
             provider,
             &request_body,
@@ -1465,12 +1464,23 @@ pub async fn post_messages_cc(
         .map(|s| s.pricing().cache_report_ratio)
         .unwrap_or(1.0);
 
+    // 提前创建 tracer，确保所有路径（包括 WebSearch）都能写入 traces.db
+    let tracer = std::sync::Arc::new(RequestTracer::new(
+        &state,
+        RequestTraceOptions {
+            key_ctx: key_ctx.clone(),
+            model: payload.model.clone(),
+            is_stream: payload.stream,
+        },
+    ));
+
     // 检查 KiroProvider 是否可用
     let provider = match &state.kiro_provider {
         Some(p) => p.clone(),
         None => {
             tracing::error!("KiroProvider 未配置");
             hook.record(0, 0, 0, 0, 0, 0.0, "error");
+            tracer.finalize("error", Some("provider_unavailable"), Some("Kiro API provider not configured"), None, TraceUsage::zero());
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorResponse::new(
@@ -1506,6 +1516,7 @@ pub async fn post_messages_cc(
         .await;
         let status = if resp.status().is_success() { "success" } else { "error" };
         hook.record(0, input_tokens, 0, 0, 0, 0.0, status);
+        tracer.finalize(status, None, None, None, TraceUsage { input_tokens: input_tokens.max(0) as u64, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, credits: 0.0 });
         return resp;
     }
 
@@ -1514,7 +1525,7 @@ pub async fn post_messages_cc(
     // where the upstream may return a tool_use with name=web_search. Take the internal agentic loop: search internally and feed the results back.
     if websearch::has_web_search_among_tools(&payload) {
         tracing::info!("detected mixed tools containing web_search, entering the web_search agentic loop");
-        return super::websearch_loop::run_web_search_loop(provider, payload, hook, payload_stream, key_ctx.group.clone(), state.tool_compatibility_mode)
+        return super::websearch_loop::run_web_search_loop(provider, payload, hook, payload_stream, key_ctx.group.clone(), state.tool_compatibility_mode, tracer)
             .await;
     }
 
@@ -1535,6 +1546,7 @@ pub async fn post_messages_cc(
             };
             tracing::warn!("请求转换失败: {}", e);
             hook.record(0, 0, 0, 0, 0, 0.0, "error");
+            tracer.finalize("error", Some("invalid_request"), Some(&message), None, TraceUsage::zero());
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(error_type, message)),
@@ -1556,6 +1568,7 @@ pub async fn post_messages_cc(
         Err(e) => {
             tracing::error!("序列化请求失败: {}", e);
             hook.record(0, 0, 0, 0, 0, 0.0, "error");
+            tracer.finalize("error", Some("internal_error"), Some(&format!("序列化请求失败: {}", e)), None, TraceUsage::zero());
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new(
@@ -1596,14 +1609,6 @@ pub async fn post_messages_cc(
 
     if payload.stream {
         // 流式响应（缓冲模式）
-        let tracer = std::sync::Arc::new(RequestTracer::new(
-            &state,
-            RequestTraceOptions {
-                key_ctx: key_ctx.clone(),
-                model: payload.model.clone(),
-                is_stream: true,
-            },
-        ));
         handle_stream_request_buffered(
             provider,
             &request_body,
@@ -1622,14 +1627,6 @@ pub async fn post_messages_cc(
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        let tracer = std::sync::Arc::new(RequestTracer::new(
-            &state,
-            RequestTraceOptions {
-                key_ctx: key_ctx.clone(),
-                model: payload.model.clone(),
-                is_stream: false,
-            },
-        ));
         handle_non_stream_request(
             provider,
             &request_body,

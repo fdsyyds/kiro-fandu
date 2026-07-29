@@ -28,7 +28,7 @@ use crate::token;
 
 use super::converter::{ConversionError, convert_request_with_mode, get_context_window_size};
 use crate::model::config::ToolCompatibilityMode;
-use super::handlers::{UsageRecordHook, map_provider_error};
+use super::handlers::{UsageRecordHook, RequestTracer, TraceUsage, map_provider_error};
 use super::stream::{CompletedToolUse, SseEvent};
 use super::types::{ErrorResponse, Message, MessagesRequest};
 use super::websearch::{self, WebSearchResults};
@@ -579,6 +579,7 @@ pub(super) async fn run_web_search_loop(
     stream_client: bool,
     group: Option<String>,
     tool_compatibility_mode: ToolCompatibilityMode,
+    tracer: Arc<RequestTracer>,
 ) -> Response {
     let fallback_input_tokens = token::count_all_tokens(
         payload.model.clone(),
@@ -608,7 +609,10 @@ pub(super) async fn run_web_search_loop(
                 .await
                 {
                     Ok(v) => v,
-                    Err(resp) => return resp,
+                    Err(resp) => {
+                        tracer.finalize("error", None, Some("run_round failed"), None, TraceUsage::zero());
+                        return resp;
+                    }
                 };
             last_credential_id = credential_id;
             last_context_input = round.context_input_tokens.or(last_context_input);
@@ -640,6 +644,7 @@ pub(super) async fn run_web_search_loop(
                         round = round_idx,
                         "upstream repeated an empty assistant turn after tool_result"
                     );
+                    tracer.finalize("error", Some("upstream_error"), Some("empty assistant turn after tool_result"), None, TraceUsage { input_tokens: final_input.max(0) as u64, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, credits: total_credits });
                     return (
                         StatusCode::BAD_GATEWAY,
                         Json(ErrorResponse::new(
@@ -683,6 +688,7 @@ pub(super) async fn run_web_search_loop(
                             total_credits,
                             "error",
                         );
+                        tracer.finalize("error", Some("mcp_search_failed"), Some(&e.to_string()), None, TraceUsage { input_tokens: fallback_input_tokens.max(0) as u64, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, credits: total_credits });
                         return map_provider_error(e);
                     }
                 }
@@ -724,6 +730,7 @@ pub(super) async fn run_web_search_loop(
                             total_credits,
                             "error",
                         );
+                        tracer.finalize("error", Some("mcp_search_failed"), Some(&e.to_string()), None, TraceUsage { input_tokens: fallback_input_tokens.max(0) as u64, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, credits: total_credits });
                         return map_provider_error(e);
                     }
                 }
@@ -759,6 +766,7 @@ pub(super) async fn run_web_search_loop(
             total_credits,
             "success",
         );
+        tracer.finalize("success", None, None, None, TraceUsage { input_tokens: final_input.max(0) as u64, output_tokens: output_tokens.max(0) as u64, cache_creation_tokens: 0, cache_read_tokens: 0, credits: total_credits });
 
         return if stream_client {
             render_sse(&payload.model, content, &stop_reason, final_input, output_tokens)
@@ -776,6 +784,7 @@ pub(super) async fn run_web_search_loop(
 
     // Theoretically unreachable (the loop always returns)
     hook.record(last_credential_id, fallback_input_tokens, 0, 0, 0, total_credits, "error");
+    tracer.finalize("error", Some("internal_error"), Some("web_search loop exited unexpectedly"), None, TraceUsage::zero());
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse::new("internal_error", "web_search loop exited unexpectedly")),
